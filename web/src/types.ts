@@ -24,12 +24,26 @@ export interface ProcPoint {
   flags?: string[];
   vpa?: number;
   note?: string;
+  hold?: { inbound: number; true: boolean; turn: string; nm?: number; min?: number };
   /** NM; "coded" in CIFP, or "spec" = RNAV 1 from the charted navigation specification */
   rnp?: number;
   rnpSrc?: "coded" | "spec";
   /** true track at the fix, degrees */
   trk?: number;
-  hold?: { inbound: number; true: boolean; turn: string; nm?: number; min?: number };
+}
+
+/**
+ * One drawn leg with its legal altitude band (feet MSL), derived from published
+ * restrictions only. null = no published limit on that side.
+ */
+export interface Segment {
+  path: [number, number][];
+  lo: number | null;
+  hi: number | null;
+  rnp?: number;
+  rnpSrc?: "coded" | "spec";
+  /** [lon, lat, ft] along a published vertical path (glideslope / VPA) */
+  glide?: [number, number, number][];
 }
 
 export interface Transition {
@@ -38,7 +52,7 @@ export interface Transition {
   routeType: string;
   path: [number, number][][];
   points: ProcPoint[];
-  corridors: { rnp: number; src: "coded" | "spec"; path: [number, number][] }[];
+  segments: Segment[];
 }
 
 export interface Procedure {
@@ -64,20 +78,21 @@ export interface Airport {
   runways: Runway[];
 }
 
-export interface MetroConfig {
-  id: string;
-  name: string;
-  airports: string[];
-  bbox: [number, number, number, number];
-  view: { lon: number; lat: number; range_m: number; heading: number; pitch: number };
-  geoid_m: number;
+export interface AirportFile {
+  airport: Airport;
+  procedures: Procedure[];
 }
 
-export interface ProcedureBundle {
-  meta: { cycle: string; effective: string; source: string; built: string };
-  metro: MetroConfig;
-  airports: Airport[];
-  procedures: Procedure[];
+/** [id, name, lon, lat, elev, sids, stars, iaps] */
+export type IndexAirport = [string, string, number, number, number, number, number, number];
+
+export interface DataIndex {
+  cycle: string;
+  effective: string;
+  built: string;
+  airports: IndexAirport[];
+  airspaceTileDeg: number;
+  airspaceTiles: string[];
 }
 
 export interface AirspaceProps {
@@ -92,9 +107,12 @@ export interface AirspaceProps {
   [k: string]: unknown;
 }
 
-export interface AirspaceBundle {
-  class: GeoJSON.FeatureCollection<GeoJSON.Polygon | GeoJSON.MultiPolygon, AirspaceProps>;
-  sua: GeoJSON.FeatureCollection<GeoJSON.Polygon | GeoJSON.MultiPolygon, AirspaceProps>;
+export type AirspaceFeature = GeoJSON.Feature<GeoJSON.Polygon | GeoJSON.MultiPolygon, AirspaceProps> & { id: string };
+
+export interface AirspaceTile {
+  class: AirspaceFeature[];
+  sua: AirspaceFeature[];
 }
 
 export const procKey = (p: Pick<Procedure, "airport" | "type" | "id">) => `${p.airport}/${p.type}/${p.id}`;
+export const transKey = (p: Procedure, i: number) => `${procKey(p)}/${i}`;

@@ -7,7 +7,9 @@ drawn track and are kept only as text notes.
 """
 from __future__ import annotations
 
-from . import geo
+import math
+
+from . import envelope, geo
 from .arinc424 import CIFP, Leg, ProcRecord
 
 SUBSECTION_TYPE = {"D": "SID", "E": "STAR", "F": "IAP"}
@@ -100,6 +102,18 @@ def fmt_alt(r: dict | None) -> str:
     return f"{r['lo']}"
 
 
+def glide_profile(path: list[list[float]], end_ft: int, vpa_deg: float) -> list[list[float]]:
+    """Altitude along a leg flown on a published vertical path angle, ending at `end_ft`."""
+    tan = math.tan(math.radians(abs(vpa_deg)))
+    out, remaining = [], 0.0
+    for i in range(len(path) - 1, -1, -1):
+        if i < len(path) - 1:
+            (lon1, lat1), (lon2, lat2) = path[i], path[i + 1]
+            remaining += geo.distance(lat1, lon1, lat2, lon2)
+        out.append([path[i][0], path[i][1], round(end_ft + tan * remaining * 6076.12)])
+    return out[::-1]
+
+
 class Builder:
     def __init__(self, cifp: CIFP):
         self.c = cifp
@@ -122,6 +136,8 @@ class Builder:
         pos: tuple[float, float] | None = None
         unresolved: list[str] = []
         corridors: list[dict] = []
+        pieces: list[dict] = []  # drawn geometry per leg, for the 3D envelope
+        cons: list[tuple[int, int | None, int | None]] = []  # (leg index, floor, ceiling)
         ptype = SUBSECTION_TYPE[rec.subsection]
         rnav_spec = rec.route_type in RNAV_ROUTE_TYPES.get(ptype, set())
 
@@ -138,7 +154,7 @@ class Builder:
                 if not cur or cur[-1] != p:
                     cur.append(p)
 
-        for leg in legs:
+        for k, leg in enumerate(legs):
             pt = leg.pt
             fixp = self.c.resolve(apt, leg.fix, leg.fix_icao, leg.fix_sec) if leg.fix else None
             if leg.fix and fixp is None:
@@ -208,6 +224,16 @@ class Builder:
                 rnp, rnp_src = RNAV1_NM, "spec"
             else:
                 rnp, rnp_src = None, None
+            if alt:
+                cons.append((k, alt.get("lo") if alt["k"] != "below" else None,
+                             alt.get("hi") if alt["k"] != "above" else None))
+            if len(drawn) >= 2:
+                piece = {"k": k, "path": [list(q) for q in drawn]}
+                if rnp:
+                    piece["rnp"], piece["rnpSrc"] = rnp, rnp_src
+                if leg.vert_angle and alt and alt["k"] == "at":
+                    piece["glide"] = glide_profile(piece["path"], alt["lo"], leg.vert_angle)
+                pieces.append(piece)
             if rnp and len(drawn) >= 2:
                 last = corridors[-1] if corridors else None
                 if last and last["rnp"] == rnp and last["src"] == rnp_src and last["path"][-1] == drawn[0]:
@@ -268,7 +294,8 @@ class Builder:
                     (lon2, lat2) = path[i + 1]
                     p["trk"] = round(geo.bearing(p["lat"], p["lon"], lat2, lon2), 1)
                     break
-        out = {"path": paths, "points": points, "corridors": corridors}
+        out = {"path": paths, "points": points, "corridors": corridors,
+               "_pieces": pieces, "_cons": cons}
         if unresolved:
             out["unresolved"] = sorted(set(unresolved))
         return out
@@ -308,4 +335,7 @@ class Builder:
                     # MAP itself belongs to the final segment; keep it only as path start
                     t["points"] = t["points"][1:]
                 proc["transitions"].append(t)
-        return list(procs.values())
+        out = list(procs.values())
+        for proc in out:
+            envelope.apply(proc)
+        return out

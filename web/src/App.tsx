@@ -4,6 +4,7 @@ import {
   Badge,
   Button,
   Checkbox,
+  Chip,
   ColorSwatch,
   Divider,
   Group,
@@ -11,6 +12,7 @@ import {
   Paper,
   ScrollArea,
   SegmentedControl,
+  Select,
   Slider,
   Stack,
   Switch,
@@ -21,107 +23,145 @@ import {
   useTree,
   type RenderTreeNodePayload,
 } from "@mantine/core";
-import { IconChevronDown, IconSearch } from "@tabler/icons-react";
+import { IconChevronDown, IconPlaneDeparture, IconSearch } from "@tabler/icons-react";
 import { schemeTableau10 } from "d3-scale-chromatic";
-import { AIRSPACE_COLORS, AirspaceScene, type DisplayOptions } from "./scene";
-import { buildTree, leavesUnder, selectedTransitions, TYPE_LABEL } from "./procTree";
-import type { AirspaceBundle, ProcType, ProcedureBundle } from "./types";
+import { AIRSPACE_COLORS, AirspaceScene, type DisplayOptions, type ViewInfo } from "./scene";
+import { buildTree, procLeaves, TYPE_LABEL } from "./procTree";
+import { AIRSPACE_MAX_HEIGHT, loadAirport, loadAirspace, pickAirports, PROC_MAX_HEIGHT } from "./loader";
+import type { AirportFile, DataIndex, ProcType, Procedure } from "./types";
+import { procKey, transKey } from "./types";
 
-const METRO = "n90";
 const TYPE_COLORS: Record<ProcType, string> = { SID: "#59a14f", STAR: "#f28e2b", IAP: "#edc948" };
-const DEFAULT_AIRPORTS = ["KJFK", "KLGA", "KEWR"];
+const TYPES: ProcType[] = ["SID", "STAR", "IAP"];
+
+/** Stable per-airport color. */
+function airportColor(id: string): string {
+  let h = 0;
+  for (const c of id) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  return schemeTableau10[h % 10];
+}
 
 export default function App() {
-  const [bundle, setBundle] = useState<ProcedureBundle>();
-  const [airspace, setAirspace] = useState<AirspaceBundle>();
+  const [index, setIndex] = useState<DataIndex>();
   const [error, setError] = useState<string>();
 
   useEffect(() => {
-    Promise.all([
-      fetch(`data/${METRO}/procedures.json`).then((r) => r.json()),
-      fetch(`data/${METRO}/airspace.json`).then((r) => r.json()),
-    ])
-      .then(([p, a]) => {
-        setBundle(p);
-        setAirspace(a);
-      })
+    fetch("data/index.json")
+      .then((r) => r.json())
+      .then(setIndex)
       .catch((e) => setError(String(e)));
   }, []);
 
   if (error) return <Text c="red" p="md">Failed to load data: {error}</Text>;
-  if (!bundle || !airspace)
+  if (!index)
     return (
       <Group justify="center" h="100vh">
         <Loader />
       </Group>
     );
-  return <Explorer bundle={bundle} airspace={airspace} />;
+  return <Explorer index={index} />;
 }
 
-function Explorer({ bundle, airspace }: { bundle: ProcedureBundle; airspace: AirspaceBundle }) {
+function Explorer({ index }: { index: DataIndex }) {
   const [opts, setOpts] = useState<DisplayOptions>({
     exaggeration: 3,
     labels: true,
-    corridors: true,
+    volumes: true,
     rnavSpec: false,
     classB: true,
-    classC: false,
+    classC: true,
     classD: false,
     sua: false,
   });
+  const [types, setTypes] = useState<Record<ProcType, boolean>>({ SID: true, STAR: true, IAP: false });
   const [colorBy, setColorBy] = useState<"airport" | "type">("airport");
   const [query, setQuery] = useState("");
-
-  const airportColor = useMemo(
-    () => Object.fromEntries(bundle.metro.airports.map((id, i) => [id, schemeTableau10[i % 10]])),
-    [bundle],
-  );
-
-  const tree = useTree({
-    initialCheckedState: leavesUnder(
-      bundle,
-      DEFAULT_AIRPORTS.flatMap((a) => [`${a}/SID`, `${a}/STAR`]),
-    ),
-  });
-  const treeData = useMemo(() => buildTree(bundle, query), [bundle, query]);
+  /** leaf keys the user has unchecked; everything else in view is shown */
+  const [hidden, setHidden] = useState<Set<string>>(new Set());
+  const [view, setView] = useState<ViewInfo>();
+  const [active, setActive] = useState<AirportFile[]>([]);
+  const [loading, setLoading] = useState(false);
 
   // --- Cesium scene lifecycle ---
   const container = useRef<HTMLDivElement>(null);
   const scene = useRef<AirspaceScene>(null);
   useEffect(() => {
-    const s = new AirspaceScene(container.current!, bundle.metro, opts);
-    s.setAirports(bundle.airports);
-    s.setAirspace(airspace);
+    const s = new AirspaceScene(container.current!, opts);
+    s.setIndex(index.airports);
+    s.onView = setView;
+    s.onAirportClick = (id) => {
+      const a = index.airports.find((x) => x[0] === id);
+      if (a) s.flyTo(a[2], a[3]);
+    };
     scene.current = s;
+    setView(s.getView());
     return () => {
       s.destroy();
       scene.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bundle, airspace]);
+  }, [index]);
 
   useEffect(() => scene.current?.setOptions(opts), [opts]);
 
+  // load procedures for airports in view
   useEffect(() => {
-    const sel = selectedTransitions(bundle, tree.checkedState);
-    scene.current?.setProcedures(
-      [...sel].map(([proc, transitions]) => ({
-        proc,
-        transitions,
-        color: colorBy === "airport" ? airportColor[proc.airport] : TYPE_COLORS[proc.type],
-      })),
+    if (!view) return;
+    let cancelled = false;
+    const ids = pickAirports(index, view, types);
+    setLoading(true);
+    Promise.allSettled(ids.map(loadAirport)).then((rs) => {
+      if (cancelled) return;
+      const files = rs.flatMap((r) => (r.status === "fulfilled" ? [r.value] : []));
+      setActive(files);
+      scene.current?.setActiveAirports(files);
+      setLoading(false);
+    });
+    loadAirspace(index, view).then((features) => {
+      if (!cancelled) scene.current?.setAirspace(features);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [index, view, types]);
+
+  // what to draw and in which color
+  useEffect(() => {
+    scene.current?.setStyle(
+      (p: Procedure) => {
+        if (!types[p.type]) return [];
+        if (p.transitions.length === 1) return hidden.has(procKey(p)) ? [] : p.transitions;
+        return p.transitions.filter((_, i) => !hidden.has(transKey(p, i)));
+      },
+      (p) => (colorBy === "airport" ? airportColor(p.airport) : TYPE_COLORS[p.type]),
     );
-  }, [bundle, tree.checkedState, colorBy, airportColor]);
+  }, [types, hidden, colorBy]);
+
+  // tree: checked = every leaf in view that is not hidden
+  const allLeaves = useMemo(
+    () => active.flatMap((f) => f.procedures.filter((p) => types[p.type]).flatMap(procLeaves)),
+    [active, types],
+  );
+  const checkedState = useMemo(() => allLeaves.filter((l) => !hidden.has(l)), [allLeaves, hidden]);
+  const tree = useTree({
+    checkedState,
+    onCheckedStateChange: (checked) => {
+      const on = new Set(checked);
+      setHidden((prev) => {
+        const next = new Set(prev);
+        for (const l of allLeaves) (on.has(l) ? next.delete(l) : next.add(l));
+        return next;
+      });
+    },
+  });
+  const treeData = useMemo(() => buildTree(active, types, query), [active, types, query]);
+
+  const airportOptions = useMemo(
+    () => index.airports.map(([id, name]) => ({ value: id, label: `${id} · ${name}` })),
+    [index],
+  );
 
   const set = <K extends keyof DisplayOptions>(k: K, v: DisplayOptions[K]) => setOpts((o) => ({ ...o, [k]: v }));
-
-  const toggleType = (type: ProcType) => {
-    const leaves = leavesUnder(bundle, bundle.airports.map((a) => `${a.id}/${type}`));
-    const checked = new Set(tree.checkedState);
-    const all = leaves.every((l) => checked.has(l));
-    leaves.forEach((l) => (all ? checked.delete(l) : checked.add(l)));
-    tree.setCheckedState([...checked]);
-  };
 
   const renderNode = ({ node, expanded, hasChildren, elementProps, tree, level }: RenderTreeNodePayload) => {
     const checked = tree.isNodeChecked(node.value);
@@ -134,8 +174,8 @@ function Explorer({ bundle, airspace }: { bundle: ProcedureBundle; airspace: Air
           indeterminate={indeterminate}
           onClick={() => (checked ? tree.uncheckNode(node.value) : tree.checkNode(node.value))}
         />
-        <Group gap={6} wrap="nowrap" style={{ flex: 1, cursor: "pointer" }} onClick={() => tree.toggleExpanded(node.value)}>
-          {level === 1 && <ColorSwatch size={10} color={airportColor[node.value]} />}
+        <Group gap={6} wrap="nowrap" style={{ flex: 1, cursor: "pointer", minWidth: 0 }} onClick={() => tree.toggleExpanded(node.value)}>
+          {level === 1 && <ColorSwatch size={10} color={airportColor(node.value)} />}
           <Text size="sm" fw={level === 1 ? 600 : 400} truncate>
             {node.label}
           </Text>
@@ -155,19 +195,33 @@ function Explorer({ bundle, airspace }: { bundle: ProcedureBundle; airspace: Air
     );
   };
 
+  const tooHigh = view && view.height > PROC_MAX_HEIGHT;
+
   return (
     <AppShell navbar={{ width: 360, breakpoint: "sm" }} padding={0}>
       <AppShell.Navbar>
         <AppShell.Section p="md" pb="xs">
-          <Title order={4}>Airspace 3D</Title>
-          <Group gap="xs" mt={4}>
-            <Text size="sm" c="dimmed">
-              {bundle.metro.name}
-            </Text>
+          <Group justify="space-between">
+            <Title order={4}>Airspace 3D</Title>
             <Badge variant="light" size="sm">
-              AIRAC {bundle.meta.cycle}
+              AIRAC {index.cycle}
             </Badge>
           </Group>
+          <Select
+            mt="sm"
+            size="xs"
+            searchable
+            clearable
+            placeholder={`Go to airport (${index.airports.length.toLocaleString()} with procedures)`}
+            leftSection={<IconPlaneDeparture size={14} />}
+            data={airportOptions}
+            limit={30}
+            value={null}
+            onChange={(id) => {
+              const a = index.airports.find((x) => x[0] === id);
+              if (a) scene.current?.flyTo(a[2], a[3]);
+            }}
+          />
         </AppShell.Section>
         <Divider />
 
@@ -176,18 +230,31 @@ function Explorer({ bundle, airspace }: { bundle: ProcedureBundle; airspace: Air
             Layers
           </Text>
           <Stack gap={8}>
-            <Switch size="sm" label="Class B" checked={opts.classB} onChange={(e) => set("classB", e.currentTarget.checked)} thumbIcon={<ColorSwatch size={8} color={AIRSPACE_COLORS.B} />} />
-            <Switch size="sm" label="Class C" checked={opts.classC} onChange={(e) => set("classC", e.currentTarget.checked)} thumbIcon={<ColorSwatch size={8} color={AIRSPACE_COLORS.C} />} />
-            <Switch size="sm" label="Class D" checked={opts.classD} onChange={(e) => set("classD", e.currentTarget.checked)} thumbIcon={<ColorSwatch size={8} color={AIRSPACE_COLORS.D} />} />
+            <Group gap="lg">
+              {(["B", "C", "D"] as const).map((c) => (
+                <Switch
+                  key={c}
+                  size="sm"
+                  label={`Class ${c}`}
+                  checked={opts[`class${c}`]}
+                  onChange={(e) => set(`class${c}`, e.currentTarget.checked)}
+                  thumbIcon={<ColorSwatch size={8} color={AIRSPACE_COLORS[c]} />}
+                />
+              ))}
+            </Group>
             <Switch size="sm" label="Special use airspace" checked={opts.sua} onChange={(e) => set("sua", e.currentTarget.checked)} thumbIcon={<ColorSwatch size={8} color={AIRSPACE_COLORS.SUA} />} />
             <Switch size="sm" label="Labels" checked={opts.labels} onChange={(e) => set("labels", e.currentTarget.checked)} />
-            <Switch size="sm" label="RNP corridors" description="±RNP where coded in CIFP (approaches)" checked={opts.corridors} onChange={(e) => set("corridors", e.currentTarget.checked)} />
             <Switch
               size="sm"
-              ml="xl"
-              disabled={!opts.corridors}
-              label="RNAV 1 on RNAV SIDs/STARs"
-              description="From the charted nav spec; not coded per leg"
+              label="Procedure volumes"
+              description="Legal altitude band from published restrictions; open sides fade"
+              checked={opts.volumes}
+              onChange={(e) => set("volumes", e.currentTarget.checked)}
+            />
+            <Switch
+              size="sm"
+              label="RNAV 1 width on RNAV SIDs/STARs"
+              description="Charted nav spec, not coded per leg (else nominal width)"
               checked={opts.rnavSpec}
               onChange={(e) => set("rnavSpec", e.currentTarget.checked)}
             />
@@ -223,20 +290,27 @@ function Explorer({ bundle, airspace }: { bundle: ProcedureBundle; airspace: Air
         <AppShell.Section p="md" pb="xs">
           <Group justify="space-between" mb="xs">
             <Text size="xs" fw={700} c="dimmed" tt="uppercase">
-              Procedures
+              Procedures in view
             </Text>
-            <Button size="compact-xs" variant="subtle" color="gray" onClick={() => tree.uncheckAllNodes()}>
-              Clear
-            </Button>
-          </Group>
-          <Group gap={6} grow mb="xs">
-            {(["SID", "STAR", "IAP"] as ProcType[]).map((t) => (
-              <Button key={t} size="compact-xs" variant="default" onClick={() => toggleType(t)}
-                leftSection={colorBy === "type" ? <ColorSwatch size={8} color={TYPE_COLORS[t]} /> : undefined}>
-                {TYPE_LABEL[t]}
+            {loading ? <Loader size={12} /> : (
+              <Button size="compact-xs" variant="subtle" color="gray" onClick={() => setHidden(new Set())}>
+                Show all
               </Button>
-            ))}
+            )}
           </Group>
+          <Chip.Group
+            multiple
+            value={TYPES.filter((t) => types[t])}
+            onChange={(v) => setTypes({ SID: v.includes("SID"), STAR: v.includes("STAR"), IAP: v.includes("IAP") })}
+          >
+            <Group gap={6} mb="xs">
+              {TYPES.map((t) => (
+                <Chip key={t} value={t} size="xs" color={colorBy === "type" ? undefined : "blue"} styles={colorBy === "type" ? { label: { borderColor: TYPE_COLORS[t] } } : undefined}>
+                  {TYPE_LABEL[t]}
+                </Chip>
+              ))}
+            </Group>
+          </Chip.Group>
           <TextInput
             size="xs"
             placeholder="Filter by procedure, transition or fix"
@@ -244,6 +318,12 @@ function Explorer({ bundle, airspace }: { bundle: ProcedureBundle; airspace: Air
             value={query}
             onChange={(e) => setQuery(e.currentTarget.value)}
           />
+          <Text size="xs" c="dimmed" mt={6}>
+            {tooHigh
+              ? "Zoom in to load procedures."
+              : `${active.length} nearest airport${active.length === 1 ? "" : "s"} loaded; pan or zoom to load others.`}
+            {view && view.height > AIRSPACE_MAX_HEIGHT ? " Airspace hidden at this altitude." : ""}
+          </Text>
         </AppShell.Section>
         <AppShell.Section grow component={ScrollArea} px="md" pb="md">
           <Tree tree={tree} data={treeData} levelOffset={18} expandOnClick={false} renderNode={renderNode} />
@@ -251,7 +331,7 @@ function Explorer({ bundle, airspace }: { bundle: ProcedureBundle; airspace: Air
         <Divider />
         <AppShell.Section p="xs" px="md">
           <Text size="xs" c="dimmed">
-            FAA CIFP · effective {bundle.meta.effective}. Not for navigation.
+            FAA CIFP · effective {index.effective}. Not for navigation.
           </Text>
         </AppShell.Section>
       </AppShell.Navbar>
@@ -268,18 +348,17 @@ function Explorer({ bundle, airspace }: { bundle: ProcedureBundle; airspace: Air
 
 function Legend() {
   return (
-    <Paper withBorder shadow="sm" p="xs" pos="absolute" bottom={36} left={12} style={{ zIndex: 1, opacity: 0.92 }}>
+    <Paper withBorder shadow="sm" p="xs" pos="absolute" bottom={36} left={12} style={{ zIndex: 1, opacity: 0.92, maxWidth: 260 }}>
       <Text size="xs" fw={700} mb={4}>
         Published restrictions
       </Text>
       <Stack gap={2}>
-        <Text size="xs">● at altitude</Text>
-        <Text size="xs">● ↑ at or above</Text>
-        <Text size="xs">● ↓ at or below</Text>
-        <Text size="xs">┃ between</Text>
-        <Text size="xs">▭ window: limits across ±RNP</Text>
+        <Text size="xs">● dot: restricted altitude at a fix</Text>
+        <Text size="xs">▬ solid plane: published floor / ceiling</Text>
+        <Text size="xs">░ fading side: no published limit</Text>
+        <Text size="xs">▰ sloped: glideslope / vertical path</Text>
         <Text size="xs" c="dimmed">
-          Ground track: legs with a defined path only
+          Band = altitudes allowed between fixes, assuming only descent on arrivals/approaches and only climb on departures.
         </Text>
       </Stack>
     </Paper>

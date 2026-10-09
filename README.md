@@ -1,7 +1,7 @@
 # Airspace 3D
 
-3D view of terminal airspace around major US metro areas: how SIDs, STARs and
-approaches stack inside and around Class B. Static site (CesiumJS + React +
+3D view of US terminal procedures and airspace: how SIDs, STARs and approaches
+stack inside and around Class B, for every airport in the FAA CIFP. Static site (CesiumJS + React +
 Mantine); data is pre-baked from FAA sources by a Python pipeline.
 
 ## Data
@@ -15,9 +15,11 @@ Display rule: only what a procedure publishes is drawn.
 - Ground tracks are drawn only for legs with a defined path (IF, TF, CF, DF, RF, AF, FC).
   Heading/course-to-altitude, vector, intercept and DME-terminated legs break the
   track and appear as notes in the info panel.
-- Altitude restrictions are drawn as gates above their fix: a dot for "at",
-  an arrow for "at or above" / "at or below", a bar for "between". No altitude
-  is interpolated between fixes.
+- Each leg is drawn at its legal altitude band: arrivals/approaches only descend
+  and departures/missed approaches only climb, so every published restriction
+  bounds the band on one side of its fix. No climb or descent gradient is
+  assumed. Sides without a published limit fade out. Final segments with a
+  published glideslope/VPA are drawn on that path.
 
 ## Develop
 
@@ -28,8 +30,9 @@ cd web && npm install && npm run dev
 
 `python -m pipeline.build --cifp path/to/FAACIFP18 --skip-airspace` reuses a local CIFP file.
 
-Metro areas are defined in `metros/*.json` (airports, bounding box, initial camera,
-geoid offset for MSL → ellipsoid heights).
+Output: `web/public/data/index.json` (airport list), `airports/<ID>.json` per
+airport, and `airspace/<x>_<y>.json` tiles. The viewer loads airports and tiles
+in view only.
 
 ## Deploy
 

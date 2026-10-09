@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.parse
+import urllib.error
 import urllib.request
 
 BASE = "https://services6.arcgis.com/ssFJjBXIUyZDrSYZ/arcgis/rest/services"
@@ -23,33 +25,50 @@ LAYERS = {
 }
 
 
-def query(service: str, where: str, fields: list[str], bbox: list[float]) -> dict:
+def _get(url: str, attempts: int = 4) -> dict:
+    req = urllib.request.Request(url, headers={"User-Agent": "airspace3d-pipeline (+https://github.com/yanjz124/airspace3d)"})
+    for i in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                body = r.read()
+            page = json.loads(body)
+            if "features" in page:
+                return page
+            err = f"unexpected response {body[:300]!r}"
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+            err = repr(e)
+        print(f"    retry {i + 1}: {err}")
+        time.sleep(5 * (i + 1))
+    raise RuntimeError(f"giving up on {url[:200]}: {err}")
+
+
+def query(service: str, where: str, fields: list[str], bbox: list[float] | None = None,
+          page_size: int = 500) -> dict:
     features = []
     offset = 0
     while True:
         params = {
             "where": where,
             "outFields": ",".join(fields),
-            "geometry": ",".join(map(str, bbox)),
-            "geometryType": "esriGeometryEnvelope",
-            "inSR": "4326",
-            "spatialRel": "esriSpatialRelIntersects",
             "outSR": "4326",
             "geometryPrecision": "5",
             "maxAllowableOffset": "0.0003",
             "resultOffset": str(offset),
+            "resultRecordCount": str(page_size),
+            "orderByFields": "OBJECTID",
             "f": "geojson",
         }
+        if bbox:
+            params.update({
+                "geometry": ",".join(map(str, bbox)),
+                "geometryType": "esriGeometryEnvelope",
+                "inSR": "4326",
+                "spatialRel": "esriSpatialRelIntersects",
+            })
         url = f"{BASE}/{service}/FeatureServer/0/query?" + urllib.parse.urlencode(params)
-        req = urllib.request.Request(url, headers={"User-Agent": "airspace3d-pipeline (+https://github.com/yanjz124/airspace3d)"})
-        with urllib.request.urlopen(req, timeout=120) as r:
-            body = r.read()
-        page = json.loads(body)
-        if "features" not in page:
-            raise RuntimeError(f"{service}: unexpected response {body[:500]!r}")
-        batch = page["features"]
+        batch = _get(url)["features"]
         features.extend(batch)
-        if not page.get("properties", {}).get("exceededTransferLimit") and not page.get("exceededTransferLimit"):
+        if len(batch) < page_size:
             break
         offset += len(batch)
     return {"type": "FeatureCollection", "features": features}
@@ -64,7 +83,7 @@ def to_feet(val, uom, code):
     return int(val), code or "MSL"
 
 
-def fetch_all(bbox: list[float]) -> dict:
+def fetch_all(bbox: list[float] | None = None) -> dict:
     out = {}
     for key, spec in LAYERS.items():
         fc = query(spec["service"], spec["where"], spec["fields"], bbox)
