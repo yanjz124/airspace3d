@@ -123,17 +123,30 @@ def main() -> None:
     shutil.rmtree(OUT / "airports", ignore_errors=True)
     airports = build_procedures(c)
 
-    tiles = None
     if not args.skip_airspace:
-        tiles = tile_airspace(airspace.fetch_all())
-    elif (OUT / "index.json").exists():
-        tiles = json.loads((OUT / "index.json").read_text(encoding="utf-8")).get("airspaceTiles")
+        bundle = airspace.fetch_all()
+        tiles = tile_airspace(bundle)
+        class_features = bundle["class"]["features"]
+    else:
+        # reuse previously written tiles
+        tiles = sorted(f.stem for f in (OUT / "airspace").glob("*.json"))
+        seen = {}
+        for t in tiles:
+            for f in json.loads((OUT / "airspace" / f"{t}.json").read_text(encoding="utf-8"))["class"]:
+                seen[f["id"]] = f
+        class_features = list(seen.values())
+
+    classes = airspace.surface_class({a[0]: (a[2], a[3]) for a in airports}, class_features)
+    for a in airports:
+        a.append(classes[a[0]])
+    counts = {k: sum(1 for v in classes.values() if v == k) for k in ("B", "C", "D", "E/G")}
+    print(f"  surface class: {counts}")
 
     write_json(OUT / "index.json", {
         "cycle": airac.cycle_ident(eff),
         "effective": eff.isoformat(),
         "built": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-        "airportFields": ["id", "name", "lon", "lat", "elev", "sids", "stars", "iaps"],
+        "airportFields": ["id", "name", "lon", "lat", "elev", "sids", "stars", "iaps", "class"],
         "airports": airports,
         "airspaceTileDeg": TILE_DEG,
         "airspaceTiles": tiles or [],

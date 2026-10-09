@@ -157,6 +157,7 @@ export class AirspaceScene {
   private airports = new Map<string, { file: AirportFile; src: CustomDataSource }>();
   private airspace = new Map<string, AirspaceFeature>();
   private dots: PointPrimitiveCollection;
+  private dotIndex: IndexAirport[] = [];
   private dotLabels: LabelCollection;
   private opts: DisplayOptions;
   private filter: ProcFilter = (p) => p.transitions;
@@ -198,6 +199,10 @@ export class AirspaceScene {
       { eventType: CameraEventType.RIGHT_DRAG, modifier: KeyboardEventModifier.CTRL },
     ];
     this.orbitAtCursor();
+    // keep the horizon level whatever the controls do
+    this.viewer.camera.percentageChanged = 0.001;
+    this.viewer.camera.changed.addEventListener(() => this.levelHorizon());
+    this.viewer.camera.moveEnd.addEventListener(() => this.levelHorizon());
 
     this.viewer.dataSources.add(this.airspaceSrc);
     this.dots = scene.primitives.add(new PointPrimitiveCollection());
@@ -227,6 +232,13 @@ export class AirspaceScene {
 
   destroy() {
     this.viewer.destroy();
+  }
+
+  private levelHorizon() {
+    const camera = this.viewer.camera;
+    if (Math.abs(camera.roll) > 1e-4 && Math.abs(camera.roll - 2 * Math.PI) > 1e-4) {
+      camera.setView({ orientation: { heading: camera.heading, pitch: camera.pitch, roll: 0 } });
+    }
   }
 
   /** Middle-drag: rotate (left/right) and tilt (up/down) around the ground point under the cursor. */
@@ -263,6 +275,7 @@ export class AirspaceScene {
       camera.rotateUp(-dy * RAD_PER_PX); // drag up = tilt toward the horizon
       camera.lookAtTransform(Matrix4.IDENTITY);
       camera.constrainedAxis = axis;
+      this.levelHorizon();
 
       // never look above the horizon or end up below the surface
       if (camera.pitch > CesiumMath.toRadians(-2) || camera.positionCartographic.height < 100) {
@@ -276,13 +289,12 @@ export class AirspaceScene {
   getView(): ViewInfo {
     const scene = this.viewer.scene;
     const camera = this.viewer.camera;
-    const mid = new Cartesian2(scene.canvas.clientWidth / 2, scene.canvas.clientHeight / 2);
-    const hit = camera.pickEllipsoid(mid);
-    let center;
-    if (hit) {
-      const c = Cartographic.fromCartesian(hit);
-      center = { lon: CesiumMath.toDegrees(c.longitude), lat: CesiumMath.toDegrees(c.latitude) };
-    }
+    const w = scene.canvas.clientWidth;
+    const hgt = scene.canvas.clientHeight;
+    // ground at the screen center; near the horizon fall back to lower on screen, then to below the camera
+    const hit = camera.pickEllipsoid(new Cartesian2(w / 2, hgt / 2)) ?? camera.pickEllipsoid(new Cartesian2(w / 2, hgt * 0.85));
+    const c = hit ? Cartographic.fromCartesian(hit) : camera.positionCartographic;
+    const center = { lon: CesiumMath.toDegrees(c.longitude), lat: CesiumMath.toDegrees(c.latitude) };
     return { rect: camera.computeViewRectangle(), center, height: camera.positionCartographic.height };
   }
 
@@ -346,6 +358,7 @@ export class AirspaceScene {
 
   /** Nationwide airport dots (cheap primitives); procedures are only drawn for active airports. */
   setIndex(airports: IndexAirport[]) {
+    this.dotIndex = airports;
     this.dots.removeAll();
     this.dotLabels.removeAll();
     for (const [id, , lon, lat, , sids, stars, iaps] of airports) {
@@ -372,6 +385,16 @@ export class AirspaceScene {
         distanceDisplayCondition: new DistanceDisplayCondition(0, big ? 900_000 : 150_000 + iaps * 10_000),
       });
     }
+  }
+
+  /** Dim airport dots (and hide their labels) for airports outside the class filter. */
+  setAirportFilter(include: (a: IndexAirport) => boolean) {
+    this.dotIndex.forEach((a, i) => {
+      const on = include(a);
+      const dot = this.dots.get(i);
+      dot.color = dot.color.withAlpha(on ? 0.9 : 0.25);
+      this.dotLabels.get(i).show = on;
+    });
   }
 
   /** Replace the set of airports whose procedures are drawn. */

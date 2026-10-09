@@ -83,8 +83,11 @@ export interface AirportFile {
   procedures: Procedure[];
 }
 
-/** [id, name, lon, lat, elev, sids, stars, iaps] */
-export type IndexAirport = [string, string, number, number, number, number, number, number];
+/** Airspace class at the airport's surface. */
+export type SurfaceClass = "B" | "C" | "D" | "E/G";
+
+/** [id, name, lon, lat, elev, sids, stars, iaps, surface class] */
+export type IndexAirport = [string, string, number, number, number, number, number, number, SurfaceClass];
 
 export interface DataIndex {
   cycle: string;

@@ -29,11 +29,12 @@ import { AIRSPACE_COLORS, AirspaceScene, type DisplayOptions, type ViewInfo } fr
 import { buildTree, procLeaves, TYPE_LABEL } from "./procTree";
 import { hasHardRestriction } from "./simplify";
 import { AIRSPACE_MAX_HEIGHT, loadAirport, loadAirspace, pickAirports, PROC_MAX_HEIGHT } from "./loader";
-import type { AirportFile, DataIndex, ProcType, Procedure } from "./types";
+import type { AirportFile, DataIndex, ProcType, Procedure, SurfaceClass } from "./types";
 import { procKey, transKey } from "./types";
 
 const TYPE_COLORS: Record<ProcType, string> = { SID: "#59a14f", STAR: "#f28e2b", IAP: "#edc948" };
 const TYPES: ProcType[] = ["SID", "STAR", "IAP"];
+const CLASSES: SurfaceClass[] = ["B", "C", "D", "E/G"];
 
 /** "hard" = has an at / between altitude at some fix (runway thresholds excluded). */
 type HardFilter = "any" | "hard" | "soft";
@@ -83,6 +84,10 @@ function Explorer({ index }: { index: DataIndex }) {
   const [colorBy, setColorBy] = useState<"airport" | "type">("airport");
   const [query, setQuery] = useState("");
   const [hardFilter, setHardFilter] = useState<HardFilter>("any");
+  /** airports are loaded only if the airspace at their surface is one of these */
+  const [classes, setClasses] = useState<SurfaceClass[]>(["B", "C"]);
+  /** an airport the user picked; always loaded */
+  const [pinned, setPinned] = useState<string>();
   /** leaf keys the user has unchecked; everything else in view is shown */
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const [view, setView] = useState<ViewInfo>();
@@ -98,7 +103,10 @@ function Explorer({ index }: { index: DataIndex }) {
     s.onView = setView;
     s.onAirportClick = (id) => {
       const a = index.airports.find((x) => x[0] === id);
-      if (a) s.flyTo(a[2], a[3]);
+      if (a) {
+        setPinned(id);
+        s.flyTo(a[2], a[3]);
+      }
     };
     scene.current = s;
     setView(s.getView());
@@ -115,7 +123,7 @@ function Explorer({ index }: { index: DataIndex }) {
   useEffect(() => {
     if (!view) return;
     let cancelled = false;
-    const ids = pickAirports(index, view, types);
+    const ids = pickAirports(index, view, types, new Set(classes), pinned);
     setLoading(true);
     Promise.allSettled(ids.map(loadAirport)).then((rs) => {
       if (cancelled) return;
@@ -130,7 +138,12 @@ function Explorer({ index }: { index: DataIndex }) {
     return () => {
       cancelled = true;
     };
-  }, [index, view, types]);
+  }, [index, view, types, classes, pinned]);
+
+  useEffect(() => {
+    const on = new Set(classes);
+    scene.current?.setAirportFilter((a) => on.has(a[8]) || a[0] === pinned);
+  }, [classes, pinned]);
 
   // what to draw and in which color
   useEffect(() => {
@@ -230,7 +243,10 @@ function Explorer({ index }: { index: DataIndex }) {
             value={null}
             onChange={(id) => {
               const a = index.airports.find((x) => x[0] === id);
-              if (a) scene.current?.flyTo(a[2], a[3]);
+              if (a) {
+                setPinned(a[0]);
+                scene.current?.flyTo(a[2], a[3]);
+              }
             }}
           />
         </AppShell.Section>
@@ -322,6 +338,20 @@ function Explorer({ index }: { index: DataIndex }) {
               ))}
             </Group>
           </Chip.Group>
+          <Group gap={6} mb="xs" wrap="nowrap">
+            <Text size="xs" c="dimmed" w={52}>
+              Airports
+            </Text>
+            <Chip.Group multiple value={classes} onChange={(v) => setClasses(v as SurfaceClass[])}>
+              <Group gap={4}>
+                {CLASSES.map((c) => (
+                  <Chip key={c} value={c} size="xs" variant="outline">
+                    {c === "E/G" ? "Class E/G" : `Class ${c}`}
+                  </Chip>
+                ))}
+              </Group>
+            </Chip.Group>
+          </Group>
           <SegmentedControl
             fullWidth
             size="xs"

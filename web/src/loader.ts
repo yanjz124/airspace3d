@@ -1,6 +1,6 @@
 import { Math as CesiumMath, Rectangle } from "cesium";
 import type { ViewInfo } from "./scene";
-import type { AirportFile, AirspaceFeature, AirspaceTile, DataIndex, IndexAirport, ProcType } from "./types";
+import type { AirportFile, AirspaceFeature, AirspaceTile, DataIndex, IndexAirport, ProcType, SurfaceClass } from "./types";
 
 /** Procedures are only loaded below this camera height (m). */
 export const PROC_MAX_HEIGHT = 450_000;
@@ -46,17 +46,28 @@ function inRect(rect: Rectangle | undefined, lon: number, lat: number): boolean 
   return Rectangle.contains(rect, { longitude: CesiumMath.toRadians(lon), latitude: CesiumMath.toRadians(lat), height: 0 } as never);
 }
 
-/** Airports whose procedures should be drawn for this view, nearest to the view center first. */
-export function pickAirports(index: DataIndex, view: ViewInfo, types: Record<ProcType, boolean>): string[] {
+/**
+ * Airports whose procedures should be drawn for this view, nearest to the view center first.
+ * `pinned` (picked by the user) is always included while in view range.
+ */
+export function pickAirports(
+  index: DataIndex,
+  view: ViewInfo,
+  types: Record<ProcType, boolean>,
+  classes: Set<SurfaceClass>,
+  pinned?: string,
+): string[] {
   if (view.height > PROC_MAX_HEIGHT || !view.center) return [];
   const { lon, lat } = view.center;
   const k = Math.cos(CesiumMath.toRadians(lat));
   const candidates = index.airports
-    .filter((a) => procCount(a, types) > 0 && inRect(view.rect, a[2], a[3]))
+    .filter((a) => procCount(a, types) > 0 && (classes.has(a[8]) || a[0] === pinned) && inRect(view.rect, a[2], a[3]))
     .map((a) => ({ a, d: ((a[2] - lon) * k) ** 2 + (a[3] - lat) ** 2 }))
     .sort((x, y) => x.d - y.d);
   const out: string[] = [];
   let budget = 0;
+  const pin = candidates.findIndex((c) => c.a[0] === pinned);
+  if (pin > 0) candidates.unshift(...candidates.splice(pin, 1));
   for (const { a } of candidates) {
     const n = procCount(a, types);
     if (out.length && (budget + n > PROC_BUDGET || out.length >= MAX_AIRPORTS)) break;
