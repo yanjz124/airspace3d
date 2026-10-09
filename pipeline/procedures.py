@@ -29,6 +29,11 @@ IAP_TYPE = {
     "S": "VOR", "T": "TACAN", "U": "SDF", "V": "VOR", "W": "MLS", "X": "LDA",
 }
 
+# RNAV SID/STAR route types. FAA charts these as RNAV 1, but CIFP leaves the
+# per-leg RNP field blank, so that value is tagged "spec" rather than "coded".
+RNAV_ROUTE_TYPES = {"SID": set("456FMS"), "STAR": set("456FMS")}
+RNAV1_NM = 1.0
+
 # Legs that end at a published fix and whose path from the previous known
 # position is defined by the leg type.
 TO_FIX = {"IF", "TF", "CF", "DF", "RF", "AF"}
@@ -116,6 +121,9 @@ class Builder:
         notes: list[dict] = []
         pos: tuple[float, float] | None = None
         unresolved: list[str] = []
+        corridors: list[dict] = []
+        ptype = SUBSECTION_TYPE[rec.subsection]
+        rnav_spec = rec.route_type in RNAV_ROUTE_TYPES.get(ptype, set())
 
         def pen_up():
             nonlocal cur
@@ -139,6 +147,7 @@ class Builder:
             alt = alt_restriction(leg)
             spd = speed_restriction(leg)
             crs = self._true(apt, leg.course, leg.course_true)
+            before, before_len = cur, len(cur)
 
             if from_first_fix and leg is legs[0] and fixll:
                 pen_up()
@@ -191,7 +200,28 @@ class Builder:
                     pen_up()
                     pos = None
 
+            # points this leg drew, including its starting point
+            drawn = cur[max(0, before_len - 1):] if cur is before else cur[:]
+            if leg.rnp:
+                rnp, rnp_src = leg.rnp, "coded"
+            elif rnav_spec:
+                rnp, rnp_src = RNAV1_NM, "spec"
+            else:
+                rnp, rnp_src = None, None
+            if rnp and len(drawn) >= 2:
+                last = corridors[-1] if corridors else None
+                if last and last["rnp"] == rnp and last["src"] == rnp_src and last["path"][-1] == drawn[0]:
+                    last["path"].extend(drawn[1:])
+                else:
+                    corridors.append({"rnp": rnp, "src": rnp_src, "path": list(drawn)})
+
             p = {"seq": leg.seq, "pt": pt}
+            if rnp:
+                p["rnp"], p["rnpSrc"] = rnp, rnp_src
+            if len(drawn) >= 2:
+                # inbound true track at the fix, for orienting the restriction window
+                (lon1, lat1), (lon2, lat2) = drawn[-2], drawn[-1]
+                p["trk"] = round(geo.bearing(lat1, lon1, lat2, lon2), 1)
             if leg.fix:
                 p["fix"] = leg.fix
             if fixll and (pt in TO_FIX or pt in HOLDS or pt in ("FC", "PI", "FA", "FM", "FD")):
@@ -227,7 +257,18 @@ class Builder:
                 notes.append({"seq": leg.seq, "text": txt})
             points.append(p)
         pen_up()
-        out = {"path": paths, "points": points}
+        # fixes that start a drawn segment take the outbound track instead
+        for p in points:
+            if "trk" in p or "lat" not in p:
+                continue
+            here = [p["lon"], p["lat"]]
+            for path in paths:
+                i = next((k for k, q in enumerate(path[:-1]) if q == here), None)
+                if i is not None:
+                    (lon2, lat2) = path[i + 1]
+                    p["trk"] = round(geo.bearing(p["lat"], p["lon"], lat2, lon2), 1)
+                    break
+        out = {"path": paths, "points": points, "corridors": corridors}
         if unresolved:
             out["unresolved"] = sorted(set(unresolved))
         return out

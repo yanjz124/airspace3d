@@ -62,6 +62,8 @@ function Explorer({ bundle, airspace }: { bundle: ProcedureBundle; airspace: Air
   const [opts, setOpts] = useState<DisplayOptions>({
     exaggeration: 3,
     labels: true,
+    corridors: true,
+    rnavSpec: false,
     classB: true,
     classC: false,
     classD: false,
@@ -179,6 +181,16 @@ function Explorer({ bundle, airspace }: { bundle: ProcedureBundle; airspace: Air
             <Switch size="sm" label="Class D" checked={opts.classD} onChange={(e) => set("classD", e.currentTarget.checked)} thumbIcon={<ColorSwatch size={8} color={AIRSPACE_COLORS.D} />} />
             <Switch size="sm" label="Special use airspace" checked={opts.sua} onChange={(e) => set("sua", e.currentTarget.checked)} thumbIcon={<ColorSwatch size={8} color={AIRSPACE_COLORS.SUA} />} />
             <Switch size="sm" label="Labels" checked={opts.labels} onChange={(e) => set("labels", e.currentTarget.checked)} />
+            <Switch size="sm" label="RNP corridors" description="±RNP where coded in CIFP (approaches)" checked={opts.corridors} onChange={(e) => set("corridors", e.currentTarget.checked)} />
+            <Switch
+              size="sm"
+              ml="xl"
+              disabled={!opts.corridors}
+              label="RNAV 1 on RNAV SIDs/STARs"
+              description="From the charted nav spec; not coded per leg"
+              checked={opts.rnavSpec}
+              onChange={(e) => set("rnavSpec", e.currentTarget.checked)}
+            />
           </Stack>
           <Text size="sm" mt="md" mb={4}>
             Vertical exaggeration · {opts.exaggeration}×
@@ -264,7 +276,8 @@ function Legend() {
         <Text size="xs">● at altitude</Text>
         <Text size="xs">● ↑ at or above</Text>
         <Text size="xs">● ↓ at or below</Text>
-        <Text size="xs">┃ between (window)</Text>
+        <Text size="xs">┃ between</Text>
+        <Text size="xs">▭ window: limits across ±RNP</Text>
         <Text size="xs" c="dimmed">
           Ground track: legs with a defined path only
         </Text>

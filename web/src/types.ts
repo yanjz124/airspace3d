@@ -24,6 +24,11 @@ export interface ProcPoint {
   flags?: string[];
   vpa?: number;
   note?: string;
+  /** NM; "coded" in CIFP, or "spec" = RNAV 1 from the charted navigation specification */
+  rnp?: number;
+  rnpSrc?: "coded" | "spec";
+  /** true track at the fix, degrees */
+  trk?: number;
   hold?: { inbound: number; true: boolean; turn: string; nm?: number; min?: number };
 }
 
@@ -33,6 +38,7 @@ export interface Transition {
   routeType: string;
   path: [number, number][][];
   points: ProcPoint[];
+  corridors: { rnp: number; src: "coded" | "spec"; path: [number, number][] }[];
 }
 
 export interface Procedure {

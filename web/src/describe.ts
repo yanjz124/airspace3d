@@ -45,13 +45,14 @@ export function describeTransition(proc: Procedure, t: Transition): string {
       const extra = [p.flags?.join(", "), p.vpa ? `VPA ${p.vpa}°` : "", p.note, holdText(p.hold)]
         .filter(Boolean)
         .join(" · ");
-      return `<tr><td>${esc(p.fix ?? "")}</td><td>${p.pt}</td><td>${alt}</td><td>${p.spd ? formatSpeed(p.spd) : ""}</td><td>${esc(extra)}</td></tr>`;
+      const rnp = p.rnp ? `${p.rnp}${p.rnpSrc === "spec" ? " (RNAV 1)" : ""}` : "";
+      return `<tr><td>${esc(p.fix ?? "")}</td><td>${p.pt}</td><td>${alt}</td><td>${p.spd ? formatSpeed(p.spd) : ""}</td><td>${rnp}</td><td>${esc(extra)}</td></tr>`;
     })
     .join("");
   const type = proc.type === "IAP" ? `${proc.approachType ?? "Approach"}` : proc.type;
   return `<p>${type} · ${KIND_TEXT[t.kind]}${t.name ? ` <b>${esc(t.name)}</b>` : ""}</p>
-<table class="cesium-infoBox-defaultTable"><thead><tr><th>Fix</th><th>Leg</th><th>Altitude</th><th>Speed</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table>
-<p style="opacity:.7">Source: FAA CIFP. Only published restrictions are shown; legs without a defined end point are not drawn.</p>`;
+<table class="cesium-infoBox-defaultTable"><thead><tr><th>Fix</th><th>Leg</th><th>Altitude</th><th>Speed</th><th>RNP</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table>
+<p style="opacity:.7">Source: FAA CIFP. Only published restrictions are shown; legs without a defined end point are not drawn. RNP marked "RNAV 1" comes from the charted navigation specification, not from CIFP.</p>`;
 }
 
 function holdText(h: Transition["points"][number]["hold"]): string {

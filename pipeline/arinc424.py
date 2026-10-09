@@ -52,6 +52,13 @@ def parse_alt(s: str) -> int | None:
     return None
 
 
+def parse_rnp(s: str) -> float | None:
+    # "XXY" = XX x 10^-Y NM, e.g. "010" = 1.0, "031" = 0.3, "011" = 0.1
+    if len(s) != 3 or not s.isdigit():
+        return None
+    return int(s[:2]) / 10 ** int(s[2])
+
+
 def parse_int(s: str, scale: float = 1.0) -> float | None:
     s = s.strip()
     if not s or not s.lstrip("-").isdigit():
@@ -79,6 +86,7 @@ class Leg:
     fix_sec: str  # e.g. "PC", "EA", "D ", "PG"
     desc: str
     turn: str
+    rnp: float | None  # NM, coded per leg (columns 45-47)
     pt: str  # path terminator
     navaid: str
     navaid_sec: str
@@ -242,6 +250,7 @@ class CIFP:
             fix_sec=col(line, 37, 38),
             desc=col(line, 40, 43),
             turn=col(line, 44, 44).strip(),
+            rnp=parse_rnp(col(line, 45, 47)),
             pt=col(line, 48, 49),
             navaid=col(line, 51, 54).strip(),
             navaid_sec=col(line, 79, 80),

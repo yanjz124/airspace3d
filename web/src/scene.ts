@@ -5,6 +5,7 @@ import {
   Cartesian3,
   Color,
   ColorMaterialProperty,
+  CornerType,
   CustomDataSource,
   DistanceDisplayCondition,
   Entity,
@@ -33,6 +34,17 @@ import type {
 import { describeAirspace, describeTransition, formatAlt, formatSpeed } from "./describe";
 
 const FT = 0.3048;
+const NM = 1852;
+
+/** Spherical destination point; returns [lat, lon]. */
+function destination(lat: number, lon: number, brg: number, nm: number): [number, number] {
+  const d = nm / 3440.065;
+  const p1 = CesiumMath.toRadians(lat);
+  const t = CesiumMath.toRadians(brg);
+  const p2 = Math.asin(Math.sin(p1) * Math.cos(d) + Math.cos(p1) * Math.sin(d) * Math.cos(t));
+  const dl = Math.atan2(Math.sin(t) * Math.sin(d) * Math.cos(p1), Math.cos(d) - Math.sin(p1) * Math.sin(p2));
+  return [CesiumMath.toDegrees(p2), lon + CesiumMath.toDegrees(dl)];
+}
 
 const esriTiles = (service: string, maximumLevel: number) =>
   new UrlTemplateImageryProvider({
@@ -53,6 +65,10 @@ export const AIRSPACE_COLORS: Record<string, string> = {
 export interface DisplayOptions {
   exaggeration: number;
   labels: boolean;
+  /** lateral ±RNP corridors and restriction windows */
+  corridors: boolean;
+  /** also use RNAV 1 for RNAV SIDs/STARs, whose legs carry no coded RNP */
+  rnavSpec: boolean;
   classB: boolean;
   classC: boolean;
   classD: boolean;
@@ -173,7 +189,7 @@ export class AirspaceScene {
     if (prev.classB !== opts.classB || prev.classC !== opts.classC || prev.classD !== opts.classD || prev.sua !== opts.sua) {
       this.renderAirspace();
     }
-    if (prev.labels !== opts.labels) {
+    if (prev.labels !== opts.labels || prev.corridors !== opts.corridors || prev.rnavSpec !== opts.rnavSpec) {
       this.renderProcedures();
       this.renderAirports();
     }
@@ -323,6 +339,22 @@ export class AirspaceScene {
     const description = describeTransition(proc, t);
     const missed = t.kind === "missed";
 
+    if (this.opts.corridors) {
+      for (const c of t.corridors) {
+        if (c.src === "spec" && !this.opts.rnavSpec) continue;
+        ents.add({
+          name: title,
+          description,
+          corridor: {
+            positions: c.path.map(([lon, lat]) => Cartesian3.fromDegrees(lon, lat)),
+            width: 2 * c.rnp * NM,
+            cornerType: CornerType.ROUNDED,
+            material: color.withAlpha(c.src === "coded" ? 0.16 : 0.09),
+          },
+        });
+      }
+    }
+
     for (const path of t.path) {
       ents.add({
         name: title,
@@ -338,9 +370,16 @@ export class AirspaceScene {
       });
     }
 
-    for (const p of t.points) {
-      if (p.lat == null || p.lon == null) continue;
-      if (p.alt) this.addGate(p, color, title, description);
+    t.points.forEach((p, i) => {
+      if (p.lat == null || p.lon == null) return;
+      if (p.alt) {
+        this.addGate(p, color, title, description);
+        // a fix that starts a leg takes that leg's RNP
+        const rnpPoint = p.rnp ? p : t.points[i + 1];
+        if (this.opts.corridors && rnpPoint?.rnp && p.trk != null && (rnpPoint.rnpSrc === "coded" || this.opts.rnavSpec)) {
+          this.addWindow(p, rnpPoint.rnp, color, title, description);
+        }
+      }
       else if (p.fix && this.opts.labels) {
         ents.add({
           name: title,
@@ -350,6 +389,39 @@ export class AirspaceScene {
           label: this.fixLabel(p.fix, 40_000),
         });
       }
+    });
+  }
+
+  /**
+   * Restriction window: published altitude limits across the ±RNP corridor,
+   * perpendicular to the track at the fix.
+   */
+  private addWindow(p: ProcPoint, rnp: number, color: Color, title: string, description: string) {
+    const ents = this.procSrc.entities;
+    const a = p.alt!;
+    const [l, r] = [-90, 90].map((d) => destination(p.lat!, p.lon!, p.trk! + d, rnp));
+    const edge = (ft: number) => Cartesian3.fromDegreesArrayHeights([l[1], l[0], this.h(ft), r[1], r[0], this.h(ft)]);
+    const common = { name: title, description };
+    // hard limits as solid bars
+    const limits = a.k === "between" ? [a.lo!, a.hi!] : a.k === "below" ? [a.hi!] : [a.lo!];
+    for (const ft of limits) {
+      ents.add({ ...common, polyline: { positions: edge(ft), width: 3, arcType: ArcType.NONE, material: color } });
+    }
+    let span: [number, number] | undefined;
+    if (a.k === "between") span = [a.lo!, a.hi!];
+    else if (a.k === "above") span = [a.lo!, a.lo! + ARROW_FT];
+    else if (a.k === "below") span = [Math.max(0, a.hi! - ARROW_FT), a.hi!];
+    if (span) {
+      ents.add({
+        ...common,
+        wall: {
+          positions: Cartesian3.fromDegreesArray([l[1], l[0], r[1], r[0]]),
+          minimumHeights: [this.h(span[0]), this.h(span[0])],
+          maximumHeights: [this.h(span[1]), this.h(span[1])],
+          // open-ended windows are drawn fainter: only one side is a limit
+          material: color.withAlpha(a.k === "between" ? 0.3 : 0.14),
+        },
+      });
     }
   }
 
