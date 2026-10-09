@@ -1,0 +1,8 @@
+{
+  "id": "n90",
+  "name": "New York TRACON (N90)",
+  "airports": ["KJFK", "KLGA", "KEWR", "KTEB", "KHPN", "KISP", "KFRG", "KMMU", "KCDW", "KLDJ"],
+  "bbox": [-75.3, 39.8, -72.2, 41.7],
+  "view": { "lon": -73.95, "lat": 40.68, "range_m": 160000, "heading": 15, "pitch": -32 },
+  "geoid_m": -32.5
+}

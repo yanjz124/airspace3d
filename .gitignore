@@ -1,0 +1,7 @@
+data/raw/
+web/node_modules/
+web/dist/
+web/public/data/
+__pycache__/
+*.pyc
+*.tsbuildinfo
