@@ -33,13 +33,18 @@ export function procLeaves(p: Procedure): string[] {
 }
 
 /** Airport -> type -> procedure -> transition, for the airports currently loaded. */
-export function buildTree(files: AirportFile[], types: Record<ProcType, boolean>, query: string): TreeNodeData[] {
+export function buildTree(
+  files: AirportFile[],
+  types: Record<ProcType, boolean>,
+  query: string,
+  include: (p: Procedure) => boolean = () => true,
+): TreeNodeData[] {
   return files
     .map(({ airport: a, procedures }) => {
       const children = (["SID", "STAR", "IAP"] as ProcType[])
         .filter((type) => types[type])
         .map((type) => {
-          const procs = procedures.filter((p) => p.type === type && matches(p, query));
+          const procs = procedures.filter((p) => p.type === type && include(p) && matches(p, query));
           return {
             value: `${a.id}/${type}`,
             label: `${TYPE_LABEL[type]} (${procs.length})`,

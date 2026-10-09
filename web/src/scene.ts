@@ -3,6 +3,7 @@ import {
   BoundingSphere,
   Cartesian2,
   Cartesian3,
+  CameraEventType,
   Cartographic,
   Color,
   ColorMaterialProperty,
@@ -13,8 +14,10 @@ import {
   HorizontalOrigin,
   ImageMaterialProperty,
   ImageryLayer,
+  KeyboardEventModifier,
   LabelCollection,
   LabelStyle,
+  Matrix4,
   Math as CesiumMath,
   NearFarScalar,
   PointPrimitiveCollection,
@@ -24,6 +27,7 @@ import {
   Rectangle,
   ScreenSpaceEventHandler,
   ScreenSpaceEventType,
+  Transforms,
   UrlTemplateImageryProvider,
   VerticalOrigin,
   Viewer,
@@ -38,6 +42,7 @@ import type {
   Transition,
 } from "./types";
 import { describeAirspace, describeTransition, formatAlt, formatSpeed } from "./describe";
+import { simplify } from "./simplify";
 
 const FT = 0.3048;
 const NM = 1852;
@@ -184,7 +189,15 @@ export class AirspaceScene {
     scene.backgroundColor = Color.fromCssColorString("#101113");
     if (scene.skyAtmosphere) scene.skyAtmosphere.show = false;
     scene.fog.enabled = false;
-    scene.screenSpaceCameraController.enableCollisionDetection = false;
+    // keep the camera above the surface
+    scene.screenSpaceCameraController.enableCollisionDetection = true;
+    scene.screenSpaceCameraController.minimumZoomDistance = 200;
+    // middle-drag orbits around the point under the cursor (see orbitAtCursor); Ctrl+drag keeps Cesium's tilt
+    scene.screenSpaceCameraController.tiltEventTypes = [
+      { eventType: CameraEventType.LEFT_DRAG, modifier: KeyboardEventModifier.CTRL },
+      { eventType: CameraEventType.RIGHT_DRAG, modifier: KeyboardEventModifier.CTRL },
+    ];
+    this.orbitAtCursor();
 
     this.viewer.dataSources.add(this.airspaceSrc);
     this.dots = scene.primitives.add(new PointPrimitiveCollection());
@@ -214,6 +227,48 @@ export class AirspaceScene {
 
   destroy() {
     this.viewer.destroy();
+  }
+
+  /** Middle-drag: rotate (left/right) and tilt (up/down) around the ground point under the cursor. */
+  private orbitAtCursor() {
+    const scene = this.viewer.scene;
+    const camera = this.viewer.camera;
+    const handler = new ScreenSpaceEventHandler(scene.canvas);
+    let pivot: Cartesian3 | undefined;
+    let last: Cartesian2 | undefined;
+    const RAD_PER_PX = 0.005;
+
+    handler.setInputAction((e: { position: Cartesian2 }) => {
+      // pivot on the ground under the cursor, or under the screen center when the cursor is on the sky
+      const center = new Cartesian2(scene.canvas.clientWidth / 2, scene.canvas.clientHeight / 2);
+      pivot = camera.pickEllipsoid(e.position) ?? camera.pickEllipsoid(center) ?? undefined;
+      last = e.position.clone();
+    }, ScreenSpaceEventType.MIDDLE_DOWN);
+    handler.setInputAction(() => {
+      if (pivot) camera.moveEnd.raiseEvent();
+      pivot = last = undefined;
+    }, ScreenSpaceEventType.MIDDLE_UP);
+    handler.setInputAction((e: { endPosition: Cartesian2 }) => {
+      if (!pivot || !last) return;
+      const dx = e.endPosition.x - last.x;
+      const dy = e.endPosition.y - last.y;
+      last = e.endPosition.clone();
+
+      const before = { position: camera.position.clone(), direction: camera.direction.clone(), up: camera.up.clone() };
+      // rotate in a local east-north-up frame centred on the pivot
+      const axis = camera.constrainedAxis;
+      camera.lookAtTransform(Transforms.eastNorthUpToFixedFrame(pivot));
+      camera.constrainedAxis = Cartesian3.UNIT_Z; // local up: tilting never changes heading
+      camera.rotateLeft(dx * RAD_PER_PX);
+      camera.rotateUp(-dy * RAD_PER_PX); // drag up = tilt toward the horizon
+      camera.lookAtTransform(Matrix4.IDENTITY);
+      camera.constrainedAxis = axis;
+
+      // never look above the horizon or end up below the surface
+      if (camera.pitch > CesiumMath.toRadians(-2) || camera.positionCartographic.height < 100) {
+        camera.setView({ destination: before.position, orientation: { direction: before.direction, up: before.up } });
+      }
+    }, ScreenSpaceEventType.MOUSE_MOVE);
   }
 
   // --- camera ---------------------------------------------------------------
@@ -428,7 +483,7 @@ export class AirspaceScene {
       const ts = this.filter(proc);
       if (!ts.length) continue;
       const color = Color.fromCssColorString(this.colorOf(proc));
-      for (const t of ts) this.addTransition(src, proc, t, color);
+      this.addProcedure(src, proc, ts, color);
     }
     ents.resumeEvents();
   }
@@ -438,44 +493,53 @@ export class AirspaceScene {
     return NOMINAL_HALF_NM;
   }
 
-  private addTransition(src: CustomDataSource, proc: Procedure, t: Transition, color: Color) {
+  private addProcedure(src: CustomDataSource, proc: Procedure, ts: Transition[], color: Color) {
     const ents = src.entities;
-    const title = `${proc.airport} ${proc.id}${t.name ? ` · ${t.name}` : ""}${t.kind === "missed" ? " · missed approach" : ""}`;
-    const description = describeTransition(proc, t);
-    const common = { name: title, description };
-    const missed = t.kind === "missed";
+    const simple = simplify(proc, ts);
+    const info = new Map<Transition, { name: string; description: string }>();
+    const common = (t: Transition) => {
+      let c = info.get(t);
+      if (!c) {
+        c = {
+          name: `${proc.airport} ${proc.id}${t.name ? ` · ${t.name}` : ""}${t.kind === "missed" ? " · missed approach" : ""}`,
+          description: describeTransition(proc, t),
+        };
+        info.set(t, c);
+      }
+      return c;
+    };
+    const tint = (t: Transition) => (t.kind === "missed" ? color.withAlpha(0.55) : color);
 
-    // ground track (shadow)
-    for (const path of t.path) {
+    // ground track only where nothing is drawn in the air
+    const tracks = this.opts.volumes ? simple.tracks : [...simple.tracks, ...simple.volumes];
+    for (const { item: s, t } of tracks) {
       ents.add({
-        ...common,
+        ...common(t),
         polyline: {
-          positions: path.map(([lon, lat]) => Cartesian3.fromDegrees(lon, lat)),
-          width: missed ? 1 : 1.5,
+          positions: s.path.map(([lon, lat]) => Cartesian3.fromDegrees(lon, lat)),
+          width: 1.5,
           clampToGround: true,
-          material: missed
-            ? new PolylineDashMaterialProperty({ color: color.withAlpha(0.4), dashLength: 12 })
-            : color.withAlpha(0.45),
+          material:
+            t.kind === "missed"
+              ? new PolylineDashMaterialProperty({ color: color.withAlpha(0.4), dashLength: 12 })
+              : color.withAlpha(0.5),
         },
       });
     }
-
     if (this.opts.volumes) {
-      for (const s of t.segments) this.addSegmentVolume(src, s, color.withAlpha(missed ? 0.6 : 1), common);
+      for (const { item: s, t } of simple.volumes) this.addSegmentVolume(src, s, tint(t), common(t));
     }
-
-    t.points.forEach((p) => {
-      if (p.lat == null || p.lon == null) return;
-      if (p.alt) this.addGate(src, p, color, common);
-      else if (p.fix && this.opts.labels) {
+    for (const { item: p, t } of simple.gates) this.addGate(src, p, tint(t), common(t));
+    if (this.opts.labels) {
+      for (const { item: p, t } of simple.fixes) {
         ents.add({
-          ...common,
-          position: Cartesian3.fromDegrees(p.lon, p.lat),
-          point: { pixelSize: 4, color: color.withAlpha(0.8), disableDepthTestDistance: Number.POSITIVE_INFINITY },
-          label: this.fixLabel(p.fix, 40_000),
+          ...common(t),
+          position: Cartesian3.fromDegrees(p.lon!, p.lat!),
+          point: { pixelSize: 3, color: color.withAlpha(0.7), disableDepthTestDistance: Number.POSITIVE_INFINITY },
+          label: this.fixLabel(p.fix!, 25_000),
         });
       }
-    });
+    }
   }
 
   /**
@@ -531,32 +595,29 @@ export class AirspaceScene {
           width: 2 * half * NM,
           height: this.h(ft),
           cornerType: CornerType.MITERED,
-          material: color.withAlpha(0.14),
-          outline: true,
-          outlineColor: color.withAlpha(0.85),
+          material: color.withAlpha(0.2),
         },
       });
     }
   }
 
-  /** Restriction at a fix: dot(s) at the limit with a label; arrows when volumes are hidden. */
+  /** Restriction at a fix: dot(s) at the limit with a label; drop line and arrows when volumes are hidden. */
   private addGate(src: CustomDataSource, p: ProcPoint, color: Color, common: object) {
     const ents = src.entities;
     const a = p.alt!;
     const at = (ft: number) => Cartesian3.fromDegrees(p.lon!, p.lat!, this.h(ft));
-    const base = a.k === "below" ? a.hi! - OPEN_FT : (a.lo ?? 0);
-
-    ents.add({
-      ...common,
-      polyline: {
-        positions: [Cartesian3.fromDegrees(p.lon!, p.lat!), at(base)],
-        width: 1,
-        arcType: ArcType.NONE,
-        material: new PolylineDashMaterialProperty({ color: color.withAlpha(0.35), dashLength: 8 }),
-      },
-    });
 
     if (!this.opts.volumes) {
+      const base = a.k === "below" ? a.hi! - OPEN_FT : (a.lo ?? 0);
+      ents.add({
+        ...common,
+        polyline: {
+          positions: [Cartesian3.fromDegrees(p.lon!, p.lat!), at(base)],
+          width: 1,
+          arcType: ArcType.NONE,
+          material: new PolylineDashMaterialProperty({ color: color.withAlpha(0.35), dashLength: 8 }),
+        },
+      });
       if (a.k === "between") {
         ents.add({ ...common, polyline: { positions: [at(a.lo!), at(a.hi!)], width: 5, arcType: ArcType.NONE, material: color } });
       } else if (a.k !== "at") {
@@ -572,8 +633,6 @@ export class AirspaceScene {
           },
         });
       }
-    } else if (p.trk != null) {
-      this.addWindow(src, p, color, common);
     }
 
     const marks = a.k === "between" ? [a.lo!, a.hi!] : a.k === "below" ? [a.hi!] : [a.lo!];
@@ -583,7 +642,7 @@ export class AirspaceScene {
         ...common,
         position: at(ft),
         point: {
-          pixelSize: a.k === "at" ? 9 : 7,
+          pixelSize: a.k === "at" ? 8 : 6,
           color,
           outlineColor: Color.BLACK,
           outlineWidth: 1,
@@ -591,44 +650,9 @@ export class AirspaceScene {
         },
         label:
           top && this.opts.labels
-            ? this.fixLabel(`${p.fix ?? ""}  ${formatAlt(a)}${p.spd ? `  ${formatSpeed(p.spd)}` : ""}`, 90_000)
+            ? this.fixLabel(`${p.fix ?? ""}  ${formatAlt(a)}${p.spd ? `  ${formatSpeed(p.spd)}` : ""}`, 60_000)
             : undefined,
       });
-    });
-  }
-
-  /** Window across the band at a restricted fix; the open side of at-or-above/below fades. */
-  private addWindow(src: CustomDataSource, p: ProcPoint, color: Color, common: object) {
-    const a = p.alt!;
-    const half = this.halfWidth(p);
-    const [l, r] = [-90, 90].map((d) => destination(p.lon!, p.lat!, p.trk! + d, half));
-    let span: [number, number];
-    let image: HTMLCanvasElement | undefined;
-    if (a.k === "between") span = [a.lo!, a.hi!];
-    else if (a.k === "above") [span, image] = [[a.lo!, a.lo! + OPEN_FT], this.fadeUp];
-    else if (a.k === "below") [span, image] = [[a.hi! - OPEN_FT, a.hi!], this.fadeDown];
-    else {
-      src.entities.add({
-        ...common,
-        polyline: {
-          positions: Cartesian3.fromDegreesArrayHeights([...l, this.h(a.lo!), ...r, this.h(a.lo!)]),
-          width: 4,
-          arcType: ArcType.NONE,
-          material: color,
-        },
-      });
-      return;
-    }
-    src.entities.add({
-      ...common,
-      wall: {
-        positions: Cartesian3.fromDegreesArray([...l, ...r]),
-        minimumHeights: [this.h(span[0]), this.h(span[0])],
-        maximumHeights: [this.h(span[1]), this.h(span[1])],
-        material: image
-          ? new ImageMaterialProperty({ image, transparent: true, color: color.withAlpha(0.6) })
-          : color.withAlpha(0.35),
-      },
     });
   }
 

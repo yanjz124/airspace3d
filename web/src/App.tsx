@@ -27,12 +27,18 @@ import { IconChevronDown, IconPlaneDeparture, IconSearch } from "@tabler/icons-r
 import { schemeTableau10 } from "d3-scale-chromatic";
 import { AIRSPACE_COLORS, AirspaceScene, type DisplayOptions, type ViewInfo } from "./scene";
 import { buildTree, procLeaves, TYPE_LABEL } from "./procTree";
+import { hasHardRestriction } from "./simplify";
 import { AIRSPACE_MAX_HEIGHT, loadAirport, loadAirspace, pickAirports, PROC_MAX_HEIGHT } from "./loader";
 import type { AirportFile, DataIndex, ProcType, Procedure } from "./types";
 import { procKey, transKey } from "./types";
 
 const TYPE_COLORS: Record<ProcType, string> = { SID: "#59a14f", STAR: "#f28e2b", IAP: "#edc948" };
 const TYPES: ProcType[] = ["SID", "STAR", "IAP"];
+
+/** "hard" = has an at / between altitude at some fix (runway thresholds excluded). */
+type HardFilter = "any" | "hard" | "soft";
+const passesHard = (p: Procedure, f: HardFilter) =>
+  f === "any" || hasHardRestriction(p.transitions) === (f === "hard");
 
 /** Stable per-airport color. */
 function airportColor(id: string): string {
@@ -76,6 +82,7 @@ function Explorer({ index }: { index: DataIndex }) {
   const [types, setTypes] = useState<Record<ProcType, boolean>>({ SID: true, STAR: true, IAP: false });
   const [colorBy, setColorBy] = useState<"airport" | "type">("airport");
   const [query, setQuery] = useState("");
+  const [hardFilter, setHardFilter] = useState<HardFilter>("any");
   /** leaf keys the user has unchecked; everything else in view is shown */
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const [view, setView] = useState<ViewInfo>();
@@ -129,18 +136,19 @@ function Explorer({ index }: { index: DataIndex }) {
   useEffect(() => {
     scene.current?.setStyle(
       (p: Procedure) => {
-        if (!types[p.type]) return [];
+        if (!types[p.type] || !passesHard(p, hardFilter)) return [];
         if (p.transitions.length === 1) return hidden.has(procKey(p)) ? [] : p.transitions;
         return p.transitions.filter((_, i) => !hidden.has(transKey(p, i)));
       },
       (p) => (colorBy === "airport" ? airportColor(p.airport) : TYPE_COLORS[p.type]),
     );
-  }, [types, hidden, colorBy]);
+  }, [types, hidden, colorBy, hardFilter]);
 
   // tree: checked = every leaf in view that is not hidden
   const allLeaves = useMemo(
-    () => active.flatMap((f) => f.procedures.filter((p) => types[p.type]).flatMap(procLeaves)),
-    [active, types],
+    () =>
+      active.flatMap((f) => f.procedures.filter((p) => types[p.type] && passesHard(p, hardFilter)).flatMap(procLeaves)),
+    [active, types, hardFilter],
   );
   const checkedState = useMemo(() => allLeaves.filter((l) => !hidden.has(l)), [allLeaves, hidden]);
   const tree = useTree({
@@ -154,7 +162,10 @@ function Explorer({ index }: { index: DataIndex }) {
       });
     },
   });
-  const treeData = useMemo(() => buildTree(active, types, query), [active, types, query]);
+  const treeData = useMemo(
+    () => buildTree(active, types, query, (p) => passesHard(p, hardFilter)),
+    [active, types, query, hardFilter],
+  );
 
   const airportOptions = useMemo(
     () => index.airports.map(([id, name]) => ({ value: id, label: `${id} · ${name}` })),
@@ -311,6 +322,18 @@ function Explorer({ index }: { index: DataIndex }) {
               ))}
             </Group>
           </Chip.Group>
+          <SegmentedControl
+            fullWidth
+            size="xs"
+            mb="xs"
+            value={hardFilter}
+            onChange={(v) => setHardFilter(v as HardFilter)}
+            data={[
+              { value: "any", label: "All" },
+              { value: "hard", label: "Hard restrictions" },
+              { value: "soft", label: "No hard restrictions" },
+            ]}
+          />
           <TextInput
             size="xs"
             placeholder="Filter by procedure, transition or fix"
