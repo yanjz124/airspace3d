@@ -7,9 +7,14 @@ export const PROC_MAX_HEIGHT = 450_000;
 /** Airspace tiles are only loaded below this camera height (m). */
 export const AIRSPACE_MAX_HEIGHT = 2_500_000;
 /** Max airports with procedures drawn at once. */
-const MAX_AIRPORTS = 12;
+const MAX_AIRPORTS = 6;
 /** Rough cap on procedures drawn at once, nearest airports first. */
-const PROC_BUDGET = 200;
+const PROC_BUDGET = 80;
+/**
+ * Airports are drawn only within this distance of the view center (km), scaled with camera
+ * height so a terminal area is shown together but far-off airports don't clutter the horizon.
+ */
+const focusRadiusKm = (height: number) => Math.min(Math.max(height / 1000, 25), 120);
 
 const airportCache = new Map<string, Promise<AirportFile>>();
 const tileCache = new Map<string, Promise<AirspaceTile | null>>();
@@ -60,9 +65,11 @@ export function pickAirports(
   if (view.height > PROC_MAX_HEIGHT || !view.center) return [];
   const { lon, lat } = view.center;
   const k = Math.cos(CesiumMath.toRadians(lat));
+  const maxDeg2 = (focusRadiusKm(view.height) / 111) ** 2;
   const candidates = index.airports
     .filter((a) => procCount(a, types) > 0 && (classes.has(a[8]) || a[0] === pinned) && inRect(view.rect, a[2], a[3]))
     .map((a) => ({ a, d: ((a[2] - lon) * k) ** 2 + (a[3] - lat) ** 2 }))
+    .filter((c) => c.d <= maxDeg2 || c.a[0] === pinned)
     .sort((x, y) => x.d - y.d);
   const out: string[] = [];
   let budget = 0;

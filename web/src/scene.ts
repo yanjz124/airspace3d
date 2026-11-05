@@ -10,6 +10,7 @@ import {
   CornerType,
   CustomDataSource,
   DistanceDisplayCondition,
+  Entity,
   HeadingPitchRange,
   HorizontalOrigin,
   ImageMaterialProperty,
@@ -22,7 +23,6 @@ import {
   NearFarScalar,
   PointPrimitiveCollection,
   PolygonHierarchy,
-  PolylineArrowMaterialProperty,
   PolylineDashMaterialProperty,
   Rectangle,
   ScreenSpaceEventHandler,
@@ -41,8 +41,9 @@ import type {
   Segment,
   Transition,
 } from "./types";
+import { procKey } from "./types";
 import { describeAirspace, describeTransition, formatAlt, formatSpeed } from "./describe";
-import { simplify } from "./simplify";
+import { newDrawn, simplify, type Drawn } from "./simplify";
 
 const FT = 0.3048;
 const NM = 1852;
@@ -52,6 +53,10 @@ const OPEN_FT = 1500;
 const NOMINAL_HALF_NM = 0.3;
 /** Thickness of the glidepath volume, in feet (before exaggeration). */
 const GLIDE_THICK_FT = 100;
+/** Unrestricted fixes are shown only within this camera distance (m). */
+const FIX_DISTANCE_M = 40_000;
+/** Camera distance (m) up to which airport labels are shown, by surface airspace class. */
+const AIRPORT_LABEL_M: Record<string, number> = { B: 3_000_000, C: 500_000, D: 150_000, "E/G": 60_000 };
 
 export const HOME = { lon: -73.95, lat: 40.68, range_m: 160_000, heading: 15, pitch: -32 };
 const OVERVIEW = { lon: -97, lat: 38, height_m: 6_000_000 };
@@ -156,8 +161,11 @@ export class AirspaceScene {
   private airspaceSrc = new CustomDataSource("airspace");
   private airports = new Map<string, { file: AirportFile; src: CustomDataSource }>();
   private airspace = new Map<string, AirspaceFeature>();
+  /** entities drawn for each airspace feature, so view changes only add/remove the difference */
+  private airspaceEnts = new Map<string, Entity[]>();
   private dots: PointPrimitiveCollection;
   private dotIndex: IndexAirport[] = [];
+  private dotFilter: (a: IndexAirport) => boolean = () => true;
   private dotLabels: LabelCollection;
   private opts: DisplayOptions;
   private filter: ProcFilter = (p) => p.transitions;
@@ -166,6 +174,10 @@ export class AirspaceScene {
   private fadeDown = gradient("fadeDown");
   onView?: (v: ViewInfo) => void;
   onAirportClick?: (id: string) => void;
+  /** a procedure was clicked in the scene (undefined = empty space) */
+  onProcedureClick?: (key: string | undefined) => void;
+  /** procedure drawn in full while all others are reduced to faint ground tracks */
+  private focus?: string;
 
   constructor(container: HTMLElement, opts: DisplayOptions) {
     this.opts = opts;
@@ -216,15 +228,24 @@ export class AirspaceScene {
     // clicking an airport dot flies there
     new ScreenSpaceEventHandler(scene.canvas).setInputAction((e: { position: Cartesian2 }) => {
       const picked = scene.pick(e.position);
-      const id = picked?.primitive?.id;
+      const id = picked?.id ?? picked?.primitive?.id;
       if (typeof id === "string" && id.startsWith("apt:")) this.onAirportClick?.(id.slice(4));
+      else if (id instanceof Entity) {
+        const key = id.properties?.proc?.getValue();
+        if (typeof key === "string") this.onProcedureClick?.(key);
+      } else if (!picked) this.onProcedureClick?.(undefined);
     }, ScreenSpaceEventType.LEFT_CLICK);
 
     const cam = new URLSearchParams(location.hash.slice(1)).get("cam");
     if (!cam || !this.setCameraString(cam)) this.flyTo(HOME.lon, HOME.lat, HOME.range_m, 0);
+    // Cesium fires moveStart/moveEnd for sub-metre jitter while idle; only react to real moves
+    let lastCam = "";
     this.viewer.camera.moveEnd.addEventListener(() => {
+      const cam = this.getCameraString();
+      if (cam === lastCam) return;
+      lastCam = cam;
       const params = new URLSearchParams(location.hash.slice(1));
-      params.set("cam", this.getCameraString());
+      params.set("cam", cam);
       history.replaceState(null, "", `#${params.toString().replaceAll("%2C", ",")}`);
       this.onView?.(this.getView());
     });
@@ -350,6 +371,21 @@ export class AirspaceScene {
     }
   }
 
+  setFocus(key: string | undefined) {
+    if (key === this.focus) return;
+    this.focus = key;
+    const sel = this.viewer.selectedEntity;
+    const selName = sel?.name;
+    const selProc = sel?.properties?.proc?.getValue();
+    this.renderAllAirports();
+    // re-rendering replaces the entities; keep the info panel on the same item
+    if (sel && selProc) {
+      const ents = [...this.airports.values()].flatMap((a) => a.src.entities.values);
+      const same = ents.filter((e) => e.properties?.proc?.getValue() === selProc);
+      this.viewer.selectedEntity = same.find((e) => e.name === selName) ?? same.find((e) => e.description);
+    }
+  }
+
   setStyle(filter: ProcFilter, colorOf: ColorFn) {
     this.filter = filter;
     this.colorOf = colorOf;
@@ -359,10 +395,22 @@ export class AirspaceScene {
   /** Nationwide airport dots (cheap primitives); procedures are only drawn for active airports. */
   setIndex(airports: IndexAirport[]) {
     this.dotIndex = airports;
+    this.renderDots();
+  }
+
+  /** Show only airports passing the filter (rebuilt rather than hidden, so hidden ones cost nothing). */
+  setAirportFilter(include: (a: IndexAirport) => boolean) {
+    this.dotFilter = include;
+    this.renderDots();
+  }
+
+  private renderDots() {
     this.dots.removeAll();
     this.dotLabels.removeAll();
-    for (const [id, , lon, lat, , sids, stars, iaps] of airports) {
-      const big = sids + stars > 0;
+    for (const a of this.dotIndex) {
+      if (!this.dotFilter(a)) continue;
+      const [id, , lon, lat, , , , , cls] = a;
+      const big = cls === "B" || cls === "C";
       const position = Cartesian3.fromDegrees(lon, lat);
       this.dots.add({
         id: `apt:${id}`,
@@ -371,6 +419,8 @@ export class AirspaceScene {
         color: Color.fromCssColorString(big ? "#e8e8e8" : "#9a9a9a").withAlpha(0.9),
         outlineColor: Color.BLACK,
         outlineWidth: 1,
+        // small airports only once zoomed in
+        distanceDisplayCondition: new DistanceDisplayCondition(0, cls === "E/G" ? 400_000 : Number.POSITIVE_INFINITY),
       });
       this.dotLabels.add({
         position,
@@ -382,19 +432,9 @@ export class AirspaceScene {
         style: LabelStyle.FILL_AND_OUTLINE,
         pixelOffset: new Cartesian2(0, -10),
         verticalOrigin: VerticalOrigin.BOTTOM,
-        distanceDisplayCondition: new DistanceDisplayCondition(0, big ? 900_000 : 150_000 + iaps * 10_000),
+        distanceDisplayCondition: new DistanceDisplayCondition(0, AIRPORT_LABEL_M[cls]),
       });
     }
-  }
-
-  /** Dim airport dots (and hide their labels) for airports outside the class filter. */
-  setAirportFilter(include: (a: IndexAirport) => boolean) {
-    this.dotIndex.forEach((a, i) => {
-      const on = include(a);
-      const dot = this.dots.get(i);
-      dot.color = dot.color.withAlpha(on ? 0.9 : 0.25);
-      this.dotLabels.get(i).show = on;
-    });
   }
 
   /** Replace the set of airports whose procedures are drawn. */
@@ -417,7 +457,15 @@ export class AirspaceScene {
 
   setAirspace(features: AirspaceFeature[]) {
     this.airspace = new Map(features.map((f) => [f.id, f]));
-    this.renderAirspace();
+    const ents = this.airspaceSrc.entities;
+    ents.suspendEvents();
+    for (const [id, list] of this.airspaceEnts) {
+      if (this.airspace.has(id)) continue;
+      for (const e of list) ents.remove(e);
+      this.airspaceEnts.delete(id);
+    }
+    for (const f of this.airspace.values()) if (!this.airspaceEnts.has(f.id)) this.addAirspaceFeature(f);
+    ents.resumeEvents();
   }
 
   // --- airspace ---------------------------------------------------------------
@@ -426,19 +474,24 @@ export class AirspaceScene {
     const ents = this.airspaceSrc.entities;
     ents.suspendEvents();
     ents.removeAll();
-    const shown: Record<string, boolean> = { B: this.opts.classB, C: this.opts.classC, D: this.opts.classD };
-    for (const f of this.airspace.values()) {
-      if (f.id.startsWith("sua")) {
-        if (this.opts.sua) this.addVolume(f, AIRSPACE_COLORS.SUA);
-      } else {
-        const cls = f.properties.CLASS ?? "";
-        if (shown[cls]) this.addVolume(f, AIRSPACE_COLORS[cls] ?? "#999");
-      }
-    }
+    this.airspaceEnts.clear();
+    for (const f of this.airspace.values()) this.addAirspaceFeature(f);
     ents.resumeEvents();
   }
 
-  private addVolume(f: AirspaceFeature, css: string) {
+  private addAirspaceFeature(f: AirspaceFeature) {
+    const out: Entity[] = [];
+    this.airspaceEnts.set(f.id, out);
+    if (f.id.startsWith("sua")) {
+      if (this.opts.sua) this.addVolume(f, AIRSPACE_COLORS.SUA, out);
+    } else {
+      const cls = f.properties.CLASS ?? "";
+      const shown: Record<string, boolean> = { B: this.opts.classB, C: this.opts.classC, D: this.opts.classD };
+      if (shown[cls]) this.addVolume(f, AIRSPACE_COLORS[cls] ?? "#999", out);
+    }
+  }
+
+  private addVolume(f: AirspaceFeature, css: string, out: Entity[]) {
     const p = f.properties;
     // Only volumes whose limits are published in MSL (or surface) can be placed without terrain.
     if (p.ceil_ft == null || p.ceil_ft < 0 || p.ceil_ref !== "MSL") return;
@@ -451,7 +504,7 @@ export class AirspaceScene {
     const ents = this.airspaceSrc.entities;
     for (const rings of polys) {
       const [outer, ...holes] = rings.map((r) => Cartesian3.fromDegreesArray(r.flat()));
-      ents.add({
+      out.push(ents.add({
         name,
         description,
         polygon: {
@@ -460,20 +513,20 @@ export class AirspaceScene {
           extrudedHeight: this.h(p.ceil_ft),
           material: new ColorMaterialProperty(color.withAlpha(0.06)),
         },
-      });
+      }));
       // Edges at floor and ceiling only; polygon outlines would add a vertical line per vertex.
       for (const ring of rings) {
-        for (const ft of [floor, p.ceil_ft]) {
-          ents.add({
+        for (const [ft, alpha] of [[floor, 0.18], [p.ceil_ft, 0.55]] as const) {
+          out.push(ents.add({
             name,
             description,
             polyline: {
               positions: Cartesian3.fromDegreesArrayHeights(ring.flatMap(([lon, lat]) => [lon, lat, this.h(ft)])),
               width: 1.5,
               arcType: ArcType.NONE,
-              material: color.withAlpha(0.7),
+              material: color.withAlpha(alpha),
             },
-          });
+          }));
         }
       }
     }
@@ -497,16 +550,19 @@ export class AirspaceScene {
         polyline: {
           positions: r.ends.map(([lon, lat]) => Cartesian3.fromDegrees(lon, lat)),
           width: 3,
-          clampToGround: true,
           material: Color.WHITE.withAlpha(0.85),
         },
       });
     }
+    // shared across this airport's procedures so common legs and labels are drawn once
+    const drawn = newDrawn();
+    const ghosts = newDrawn();
     for (const proc of file.procedures) {
       const ts = this.filter(proc);
       if (!ts.length) continue;
       const color = Color.fromCssColorString(this.colorOf(proc));
-      this.addProcedure(src, proc, ts, color);
+      if (this.focus && procKey(proc) !== this.focus) this.addGhost(src, proc, ts, color, ghosts);
+      else this.addProcedure(src, proc, ts, color, drawn);
     }
     ents.resumeEvents();
   }
@@ -516,53 +572,100 @@ export class AirspaceScene {
     return NOMINAL_HALF_NM;
   }
 
-  private addProcedure(src: CustomDataSource, proc: Procedure, ts: Transition[], color: Color) {
+  /** Context for a focused procedure: every other procedure as a faint ground track only. */
+  private addGhost(src: CustomDataSource, proc: Procedure, ts: Transition[], color: Color, drawn: Drawn) {
+    const simple = simplify(proc, ts, drawn);
+    const properties = { proc: procKey(proc) };
+    for (const { item: s } of [...simple.tracks, ...simple.volumes]) {
+      src.entities.add({
+        name: `${proc.airport} ${proc.id}`,
+        properties,
+        polyline: {
+          positions: s.path.map(([lon, lat]) => Cartesian3.fromDegrees(lon, lat)),
+          width: 1,
+          arcType: ArcType.GEODESIC,
+          material: color.withAlpha(0.15),
+        },
+      });
+    }
+  }
+
+  private addProcedure(src: CustomDataSource, proc: Procedure, ts: Transition[], color: Color, drawn: Drawn) {
     const ents = src.entities;
-    const simple = simplify(proc, ts);
-    const info = new Map<Transition, { name: string; description: string }>();
+    const simple = simplify(proc, ts, drawn);
+    const properties = { proc: procKey(proc) };
+    const info = new Map<Transition, { name: string; description: string; properties: object }>();
     const common = (t: Transition) => {
       let c = info.get(t);
       if (!c) {
         c = {
           name: `${proc.airport} ${proc.id}${t.name ? ` · ${t.name}` : ""}${t.kind === "missed" ? " · missed approach" : ""}`,
           description: describeTransition(proc, t),
+          properties,
         };
         info.set(t, c);
       }
       return c;
     };
     const tint = (t: Transition) => (t.kind === "missed" ? color.withAlpha(0.55) : color);
+    /** full volumes for the focused procedure (or for all, if asked); lines at the published limits otherwise */
+    const full = this.opts.volumes || procKey(proc) === this.focus;
 
-    // ground track only where nothing is drawn in the air
-    const tracks = this.opts.volumes ? simple.tracks : [...simple.tracks, ...simple.volumes];
-    for (const { item: s, t } of tracks) {
+    // legs without any published altitude: ground track
+    for (const { item: s, t } of simple.tracks) {
       ents.add({
         ...common(t),
         polyline: {
           positions: s.path.map(([lon, lat]) => Cartesian3.fromDegrees(lon, lat)),
           width: 1.5,
-          clampToGround: true,
+          arcType: ArcType.GEODESIC,
           material:
             t.kind === "missed"
-              ? new PolylineDashMaterialProperty({ color: color.withAlpha(0.4), dashLength: 12 })
-              : color.withAlpha(0.5),
+              ? new PolylineDashMaterialProperty({ color: color.withAlpha(0.3), dashLength: 12 })
+              : color.withAlpha(0.35),
         },
       });
     }
-    if (this.opts.volumes) {
-      for (const { item: s, t } of simple.volumes) this.addSegmentVolume(src, s, tint(t), common(t));
+    for (const { item: s, t } of simple.volumes) {
+      if (full) this.addSegmentVolume(src, s, tint(t), common(t));
+      else this.addSegmentLines(src, s, tint(t), common(t), t.kind === "missed");
     }
-    for (const { item: p, t } of simple.gates) this.addGate(src, p, tint(t), common(t));
+    for (const { item: p, t } of simple.gates) this.addGate(src, p, tint(t), common(t), full);
     if (this.opts.labels) {
       for (const { item: p, t } of simple.fixes) {
         ents.add({
           ...common(t),
           position: Cartesian3.fromDegrees(p.lon!, p.lat!),
-          point: { pixelSize: 3, color: color.withAlpha(0.7), disableDepthTestDistance: Number.POSITIVE_INFINITY },
-          label: this.fixLabel(p.fix!, 25_000),
+          point: {
+            pixelSize: 3,
+            color: color.withAlpha(0.7),
+            disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            distanceDisplayCondition: new DistanceDisplayCondition(0, FIX_DISTANCE_M),
+          },
+          label: this.fixLabel(p.fix!, FIX_DISTANCE_M),
         });
       }
     }
+  }
+
+  /**
+   * Overview form of a leg: a line at each published limit (or along the published vertical
+   * path), plus a faint ground shadow so the line can be placed over the map.
+   */
+  private addSegmentLines(src: CustomDataSource, s: Segment, color: Color, common: object, missed: boolean) {
+    const ents = src.entities;
+    const material = missed ? new PolylineDashMaterialProperty({ color, dashLength: 12 }) : color.withAlpha(0.9);
+    const line = (positions: Cartesian3[], width: number, mat: unknown) =>
+      ents.add({ ...common, polyline: { positions, width, arcType: ArcType.GEODESIC, material: mat as Color } });
+    if (s.glide) {
+      line(s.glide.map(([lon, lat, ft]) => Cartesian3.fromDegrees(lon, lat, this.h(ft))), 3, material);
+    } else {
+      for (const ft of [s.lo, s.hi]) {
+        if (ft == null) continue;
+        line(s.path.map(([lon, lat]) => Cartesian3.fromDegrees(lon, lat, this.h(ft))), 2, material);
+      }
+    }
+    line(s.path.map(([lon, lat]) => Cartesian3.fromDegrees(lon, lat)), 1, color.withAlpha(0.12));
   }
 
   /**
@@ -624,39 +727,11 @@ export class AirspaceScene {
     }
   }
 
-  /** Restriction at a fix: dot(s) at the limit with a label; drop line and arrows when volumes are hidden. */
-  private addGate(src: CustomDataSource, p: ProcPoint, color: Color, common: object) {
+  /** Restriction at a fix: dot(s) at the limit with a label (readable from further away when drawn in full). */
+  private addGate(src: CustomDataSource, p: ProcPoint, color: Color, common: object, full: boolean) {
     const ents = src.entities;
     const a = p.alt!;
     const at = (ft: number) => Cartesian3.fromDegrees(p.lon!, p.lat!, this.h(ft));
-
-    if (!this.opts.volumes) {
-      const base = a.k === "below" ? a.hi! - OPEN_FT : (a.lo ?? 0);
-      ents.add({
-        ...common,
-        polyline: {
-          positions: [Cartesian3.fromDegrees(p.lon!, p.lat!), at(base)],
-          width: 1,
-          arcType: ArcType.NONE,
-          material: new PolylineDashMaterialProperty({ color: color.withAlpha(0.35), dashLength: 8 }),
-        },
-      });
-      if (a.k === "between") {
-        ents.add({ ...common, polyline: { positions: [at(a.lo!), at(a.hi!)], width: 5, arcType: ArcType.NONE, material: color } });
-      } else if (a.k !== "at") {
-        const from = a.k === "above" ? a.lo! : a.hi!;
-        const to = a.k === "above" ? from + OPEN_FT : from - OPEN_FT;
-        ents.add({
-          ...common,
-          polyline: {
-            positions: [at(from), at(to)],
-            width: 10,
-            arcType: ArcType.NONE,
-            material: new PolylineArrowMaterialProperty(color.withAlpha(0.9)),
-          },
-        });
-      }
-    }
 
     const marks = a.k === "between" ? [a.lo!, a.hi!] : a.k === "below" ? [a.hi!] : [a.lo!];
     marks.forEach((ft, i) => {
@@ -673,7 +748,7 @@ export class AirspaceScene {
         },
         label:
           top && this.opts.labels
-            ? this.fixLabel(`${p.fix ?? ""}  ${formatAlt(a)}${p.spd ? `  ${formatSpeed(p.spd)}` : ""}`, 60_000)
+            ? this.fixLabel(`${p.fix ?? ""}  ${formatAlt(a)}${p.spd ? `  ${formatSpeed(p.spd)}` : ""}`, full ? 80_000 : 40_000)
             : undefined,
       });
     });

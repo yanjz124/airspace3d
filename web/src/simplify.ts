@@ -36,8 +36,20 @@ function mergeable(a: Segment, b: Segment): boolean {
   );
 }
 
-export function simplify(proc: Procedure, transitions: Transition[]): SimplifiedProcedure {
-  const seen = new Set<string>();
+/**
+ * Keys of what has already been drawn. Pass one shared instance across the procedures of an
+ * airport so legs and restrictions common to several procedures (e.g. ILS, LOC and RNAV to the
+ * same runway) are drawn once.
+ */
+export interface Drawn {
+  segs: Set<string>;
+  gates: Set<string>;
+  fixes: Set<string>;
+}
+export const newDrawn = (): Drawn => ({ segs: new Set(), gates: new Set(), fixes: new Set() });
+
+export function simplify(proc: Procedure, transitions: Transition[], drawn: Drawn = newDrawn()): SimplifiedProcedure {
+  const seen = drawn.segs;
   const volumes: Tagged<Segment>[] = [];
   const tracks: Tagged<Segment>[] = [];
 
@@ -68,21 +80,19 @@ export function simplify(proc: Procedure, transitions: Transition[]): Simplified
     for (const p of t.points) {
       if (p.lat == null || p.lon == null) continue;
       if (p.alt) {
-        const key = `${p.fix ?? `${p.lat},${p.lon}`}|${p.alt.k}|${p.alt.lo}|${p.alt.hi}`;
-        if (!gates.has(key)) gates.set(key, { item: p, t });
-      } else if (p.fix && !fixes.has(p.fix)) {
+        const key = `${p.fix ?? `${p.lat},${p.lon}`}|${p.alt.k}|${p.alt.lo}|${p.alt.hi}|${p.spd?.kt ?? ""}`;
+        if (!gates.has(key) && !drawn.gates.has(key)) gates.set(key, { item: p, t });
+      } else if (p.fix && !fixes.has(p.fix) && !drawn.fixes.has(p.fix)) {
         fixes.set(p.fix, { item: p, t });
       }
     }
   }
+  for (const k of gates.keys()) drawn.gates.add(k);
   // a fix with a restriction somewhere doesn't also need a plain label
-  const restricted = new Set([...gates.values()].map((g) => g.item.fix));
-  return {
-    volumes,
-    tracks,
-    gates: [...gates.values()],
-    fixes: [...fixes.values()].filter((f) => !restricted.has(f.item.fix)),
-  };
+  for (const g of gates.values()) if (g.item.fix) drawn.fixes.add(g.item.fix);
+  const plain = [...fixes.values()].filter((f) => !drawn.fixes.has(f.item.fix!));
+  for (const f of plain) drawn.fixes.add(f.item.fix!);
+  return { volumes, tracks, gates: [...gates.values()], fixes: plain };
 }
 
 /**
