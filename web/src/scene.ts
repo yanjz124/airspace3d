@@ -715,12 +715,14 @@ export class AirspaceScene {
         ents.add({
           ...common(t),
           position: Cartesian3.fromDegrees(p.lon!, p.lat!),
-          point: {
-            pixelSize: 3,
-            color: fa(color, 0.7),
-            disableDepthTestDistance: Number.POSITIVE_INFINITY,
-            distanceDisplayCondition: new DistanceDisplayCondition(0, FIX_DISTANCE_M),
-          },
+          point: full
+            ? {
+                pixelSize: 3,
+                color: fa(color, 0.7),
+                disableDepthTestDistance: Number.POSITIVE_INFINITY,
+                distanceDisplayCondition: new DistanceDisplayCondition(0, FIX_DISTANCE_M),
+              }
+            : undefined,
           label: this.fixLabel(p.fix!, FIX_DISTANCE_M),
         });
       }
@@ -805,7 +807,7 @@ export class AirspaceScene {
     }
   }
 
-  /** Restriction at a fix: dot(s) at the limit with a label (readable from further away when drawn in full). */
+  /** Restriction at a fix: a label at the limit; dots too when drawn in full (focused). */
   private addGate(src: CustomDataSource, p: ProcPoint, color: Color, common: object, full: boolean) {
     const ents = src.entities;
     const a = p.alt!;
@@ -814,16 +816,20 @@ export class AirspaceScene {
     const marks = a.k === "between" ? [a.lo!, a.hi!] : a.k === "below" ? [a.hi!] : [a.lo!];
     marks.forEach((ft, i) => {
       const top = i === marks.length - 1;
+      // overview: label only, no dots; the focused procedure gets a dot per limit
+      if (!full && (!top || !this.opts.labels)) return;
       ents.add({
         ...common,
         position: at(ft),
-        point: {
-          pixelSize: a.k === "at" ? 8 : 6,
-          color,
-          outlineColor: Color.BLACK,
-          outlineWidth: 1,
-          disableDepthTestDistance: Number.POSITIVE_INFINITY,
-        },
+        point: full
+          ? {
+              pixelSize: a.k === "at" ? 8 : 6,
+              color,
+              outlineColor: Color.BLACK,
+              outlineWidth: 1,
+              disableDepthTestDistance: Number.POSITIVE_INFINITY,
+            }
+          : undefined,
         label:
           top && this.opts.labels
             ? this.fixLabel(`${p.fix ?? ""}  ${formatAlt(a)}${p.spd ? `  ${formatSpeed(p.spd)}` : ""}`, full ? 80_000 : 40_000)
