@@ -45,8 +45,12 @@ export interface Drawn {
   segs: Set<string>;
   gates: Set<string>;
   fixes: Set<string>;
+  /** dedupe legs by ground path alone, so a path flown at several altitudes is drawn once */
+  byPath: boolean;
 }
-export const newDrawn = (): Drawn => ({ segs: new Set(), gates: new Set(), fixes: new Set() });
+export const newDrawn = (byPath = false): Drawn => ({ segs: new Set(), gates: new Set(), fixes: new Set(), byPath });
+
+const pathKey = (s: Segment) => s.path.map(([x, y]) => `${x.toFixed(4)},${y.toFixed(4)}`).join(";");
 
 export function simplify(proc: Procedure, transitions: Transition[], drawn: Drawn = newDrawn()): SimplifiedProcedure {
   const seen = drawn.segs;
@@ -56,7 +60,7 @@ export function simplify(proc: Procedure, transitions: Transition[], drawn: Draw
   for (const t of transitions) {
     let run: Tagged<Segment> | undefined;
     for (const s of t.segments) {
-      const key = segKey(s);
+      const key = drawn.byPath ? pathKey(s) : segKey(s);
       if (seen.has(key)) {
         run = undefined; // drawn by another transition; break the run here
         continue;
