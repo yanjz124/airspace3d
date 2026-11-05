@@ -21,6 +21,16 @@ Display rule: only what a procedure publishes is drawn.
   assumed. Sides without a published limit fade out. Final segments with a
   published glideslope/VPA are drawn on that path.
 
+Viewing:
+- Procedures are drawn for the few airports nearest the view center (within a radius
+  that grows with camera height), so one terminal area is shown at a time.
+- In the overview each leg is a line at its published limit(s) or glidepath. Click a
+  procedure (in the scene or the list) to focus it: it is drawn as its full altitude
+  band and everything else fades to faint ground tracks. Esc or "Show all" returns.
+  "Volumes for every procedure" under Display options draws all bands at once.
+- The range slider (default 40 NM) cuts procedures off at that distance from their
+  airport; a focused procedure is always drawn whole.
+
 ## Develop
 
 ```sh
