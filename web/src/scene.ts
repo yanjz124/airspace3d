@@ -21,7 +21,6 @@ import {
   Matrix4,
   Math as CesiumMath,
   NearFarScalar,
-  PointPrimitiveCollection,
   PolygonHierarchy,
   PolylineDashMaterialProperty,
   Rectangle,
@@ -168,7 +167,6 @@ export class AirspaceScene {
   private airspace = new Map<string, AirspaceFeature>();
   /** entities drawn for each airspace feature, so view changes only add/remove the difference */
   private airspaceEnts = new Map<string, Entity[]>();
-  private dots: PointPrimitiveCollection;
   private dotIndex: IndexAirport[] = [];
   private dotFilter: (a: IndexAirport) => boolean = () => true;
   private dotLabels: LabelCollection;
@@ -222,7 +220,6 @@ export class AirspaceScene {
     this.viewer.camera.moveEnd.addEventListener(() => this.levelHorizon());
 
     this.viewer.dataSources.add(this.airspaceSrc);
-    this.dots = scene.primitives.add(new PointPrimitiveCollection());
     this.dotLabels = scene.primitives.add(new LabelCollection());
 
     this.viewer.homeButton.viewModel.command.beforeExecute.addEventListener((e) => {
@@ -232,10 +229,18 @@ export class AirspaceScene {
 
     // clicking an airport dot flies there
     new ScreenSpaceEventHandler(scene.canvas).setInputAction((e: { position: Cartesian2 }) => {
+      // an airport code can sit inside its airspace volume, so look under the top hit too
+      const apt = scene
+        .drillPick(e.position, 4)
+        .map((x) => x?.id ?? x?.primitive?.id)
+        .find((x) => typeof x === "string" && x.startsWith("apt:"));
+      if (apt) {
+        this.onAirportClick?.(apt.slice(4));
+        return;
+      }
       const picked = scene.pick(e.position);
       const id = picked?.id ?? picked?.primitive?.id;
-      if (typeof id === "string" && id.startsWith("apt:")) this.onAirportClick?.(id.slice(4));
-      else if (id instanceof Entity) {
+      if (id instanceof Entity) {
         const key = id.properties?.proc?.getValue();
         if (typeof key === "string") this.onProcedureClick?.(key);
       } else if (!picked) this.onProcedureClick?.(undefined);
@@ -395,7 +400,7 @@ export class AirspaceScene {
   }
 
 
-  /** Nationwide airport dots (cheap primitives); procedures are only drawn for active airports. */
+  /** Nationwide airport codes (cheap primitives); procedures are only drawn for active airports. */
   setIndex(airports: IndexAirport[]) {
     this.dotIndex = airports;
     this.renderDots();
@@ -408,34 +413,26 @@ export class AirspaceScene {
   }
 
   private renderDots() {
-    this.dots.removeAll();
     this.dotLabels.removeAll();
     for (const a of this.dotIndex) {
       if (!this.dotFilter(a)) continue;
       const [id, , lon, lat, , , , , cls] = a;
       const big = cls === "B" || cls === "C";
       const position = Cartesian3.fromDegrees(lon, lat);
-      this.dots.add({
+      // no dot: the code itself is the marker and the click target
+      this.dotLabels.add({
         id: `apt:${id}`,
         position,
-        pixelSize: big ? 6 : 4,
-        color: Color.fromCssColorString(big ? "#e8e8e8" : "#9a9a9a").withAlpha(0.9),
-        outlineColor: Color.BLACK,
-        outlineWidth: 1,
-        // small airports only once zoomed in
-        distanceDisplayCondition: new DistanceDisplayCondition(0, cls === "E/G" ? 400_000 : Number.POSITIVE_INFINITY),
-      });
-      this.dotLabels.add({
-        position,
         text: id,
-        font: "11px system-ui, sans-serif",
-        fillColor: Color.fromCssColorString("#d0d0d0"),
+        font: big ? "600 12px system-ui, sans-serif" : "11px system-ui, sans-serif",
+        fillColor: Color.fromCssColorString(big ? "#e8e8e8" : "#a8a8a8"),
         outlineColor: Color.BLACK,
         outlineWidth: 3,
         style: LabelStyle.FILL_AND_OUTLINE,
-        pixelOffset: new Cartesian2(0, -10),
-        verticalOrigin: VerticalOrigin.BOTTOM,
+        verticalOrigin: VerticalOrigin.CENTER,
+        horizontalOrigin: HorizontalOrigin.CENTER,
         distanceDisplayCondition: new DistanceDisplayCondition(0, AIRPORT_LABEL_M[cls]),
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
       });
     }
   }
