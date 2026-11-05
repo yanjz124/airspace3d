@@ -34,6 +34,8 @@ import { procKey, transKey } from "./types";
 
 const TYPE_COLORS: Record<ProcType, string> = { SID: "#59a14f", STAR: "#f28e2b", IAP: "#edc948" };
 const TYPES: ProcType[] = ["SID", "STAR", "IAP"];
+/** Range slider: values above RANGE_MAX mean "no limit". */
+const RANGE_MAX = 150;
 const CLASSES: SurfaceClass[] = ["B", "C", "D", "E/G"];
 
 /** "hard" = has an at / between altitude at some fix (runway thresholds excluded). */
@@ -78,6 +80,7 @@ function Explorer({ index }: { index: DataIndex }) {
     labels: true,
     volumes: false,
     rnavSpec: false,
+    rangeNm: 40,
     classB: true,
     classC: true,
     classD: false,
@@ -315,6 +318,26 @@ function Explorer({ index }: { index: DataIndex }) {
               Display options
             </Button>
           </Group>
+          <Text size="xs" mt="sm" mb={2}>
+            Show procedures within{" "}
+            <b>{opts.rangeNm == null ? "any distance" : `${opts.rangeNm} NM`}</b> of the airport
+          </Text>
+          <Slider
+            size="sm"
+            min={10}
+            max={RANGE_MAX + 10}
+            step={5}
+            defaultValue={opts.rangeNm ?? RANGE_MAX + 10}
+            label={(v) => (v > RANGE_MAX ? "No limit" : `${v} NM`)}
+            onChangeEnd={(v) => set("rangeNm", v > RANGE_MAX ? null : v)}
+            marks={[
+              { value: 20, label: "20" },
+              { value: 40, label: "40" },
+              { value: 80, label: "80" },
+              { value: RANGE_MAX + 10, label: "All" },
+            ]}
+            mb="lg"
+          />
           <Collapse expanded={showDisplay}>
             <Stack gap={8} mt="sm">
               <Switch

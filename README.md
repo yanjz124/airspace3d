@@ -28,6 +28,8 @@ Viewing:
   procedure (in the scene or the list) to focus it: it is drawn as its full altitude
   band and everything else fades to faint ground tracks. Esc or "Show all" returns.
   "Volumes for every procedure" under Display options draws all bands at once.
+- The range slider (default 40 NM) cuts procedures off at that distance from their
+  airport; a focused procedure is always drawn whole.
 
 ## Develop
 

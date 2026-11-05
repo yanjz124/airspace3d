@@ -75,6 +75,8 @@ export interface DisplayOptions {
   volumes: boolean;
   /** use RNAV 1 width for RNAV SIDs/STARs, whose legs carry no coded RNP */
   rnavSpec: boolean;
+  /** NM from the airport beyond which procedure legs are cut off; null = no limit */
+  rangeNm: number | null;
   classB: boolean;
   classC: boolean;
   classD: boolean;
@@ -133,6 +135,9 @@ function offsetEdges(path: [number, number][], half: number): [[number, number][
   }
   return [left, right];
 }
+
+/** Scale a color's existing alpha, so a faded color stays faded through every material. */
+const fa = (c: Color, a: number) => c.withAlpha(c.alpha * a);
 
 /** Vertical alpha gradients for wall textures (t = 0 at the bottom of a wall). */
 function gradient(kind: "fadeUp" | "fadeDown"): HTMLCanvasElement {
@@ -365,7 +370,8 @@ export class AirspaceScene {
       prev.exaggeration !== opts.exaggeration ||
       prev.labels !== opts.labels ||
       prev.volumes !== opts.volumes ||
-      prev.rnavSpec !== opts.rnavSpec
+      prev.rnavSpec !== opts.rnavSpec ||
+      prev.rangeNm !== opts.rangeNm
     ) {
       this.renderAllAirports();
     }
@@ -557,6 +563,7 @@ export class AirspaceScene {
     // shared across this airport's procedures so common legs and labels are drawn once
     const drawn = newDrawn();
     const ghosts = newDrawn();
+    this.origin = [a.lon, a.lat];
     for (const proc of file.procedures) {
       const ts = this.filter(proc);
       if (!ts.length) continue;
@@ -573,10 +580,72 @@ export class AirspaceScene {
   }
 
   /** Context for a focused procedure: every other procedure as a faint ground track only. */
+  /** airport whose procedures are being drawn, for the fade-out range */
+  private origin: [number, number] = [0, 0];
+
+  /** Distance from the airport being drawn, NM (flat-earth approximation, fine at terminal scale). */
+  private distNm(lon: number, lat: number): number {
+    const [lon0, lat0] = this.origin;
+    const k = Math.cos(CesiumMath.toRadians(lat0));
+    return Math.hypot((lon - lon0) * k, lat - lat0) * 60;
+  }
+
+  private inRange(lon: number, lat: number): boolean {
+    return this.opts.rangeNm == null || this.distNm(lon, lat) <= this.opts.rangeNm;
+  }
+
+  /**
+   * Parts of a leg within the range of the airport, cut where the path crosses it.
+   * `pt` reads [lon, lat] from a vertex; `lerp` interpolates between two vertices.
+   */
+  private clip<T>(path: T[], pt: (v: T) => [number, number], lerp: (a: T, b: T, t: number) => T): T[][] {
+    const r = this.opts.rangeNm;
+    if (r == null) return [path];
+    const d = path.map((v) => this.distNm(...pt(v)));
+    const runs: T[][] = [];
+    let run: T[] = [];
+    for (let i = 0; i < path.length; i++) {
+      const inside = d[i] <= r;
+      if (i > 0 && inside !== d[i - 1] <= r) {
+        // crossing the range circle between i-1 and i
+        const cut = lerp(path[i - 1], path[i], (r - d[i - 1]) / (d[i] - d[i - 1]));
+        run.push(cut);
+        if (!inside) {
+          runs.push(run);
+          run = [];
+        } else run = [cut];
+      }
+      if (inside) run.push(path[i]);
+    }
+    if (run.length) runs.push(run);
+    return runs.filter((x) => x.length > 1);
+  }
+
+  /** A segment split into the parts within range. */
+  private clipSegment(s: Segment): Segment[] {
+    if (this.opts.rangeNm == null) return [s];
+    const ll = (a: [number, number], b: [number, number], t: number): [number, number] => [
+      a[0] + (b[0] - a[0]) * t,
+      a[1] + (b[1] - a[1]) * t,
+    ];
+    if (s.glide) {
+      const g3 = (a: [number, number, number], b: [number, number, number], t: number): [number, number, number] => [
+        ...ll([a[0], a[1]], [b[0], b[1]], t),
+        a[2] + (b[2] - a[2]) * t,
+      ];
+      return this.clip(s.glide, (v) => [v[0], v[1]], g3).map((glide) => ({
+        ...s,
+        glide,
+        path: glide.map(([lon, lat]) => [lon, lat] as [number, number]),
+      }));
+    }
+    return this.clip(s.path, (v) => v, ll).map((path) => ({ ...s, path }));
+  }
+
   private addGhost(src: CustomDataSource, proc: Procedure, ts: Transition[], color: Color, drawn: Drawn) {
     const simple = simplify(proc, ts, drawn);
     const properties = { proc: procKey(proc) };
-    for (const { item: s } of [...simple.tracks, ...simple.volumes]) {
+    for (const s of [...simple.tracks, ...simple.volumes].flatMap(({ item }) => this.clipSegment(item))) {
       src.entities.add({
         name: `${proc.airport} ${proc.id}`,
         properties,
@@ -584,7 +653,7 @@ export class AirspaceScene {
           positions: s.path.map(([lon, lat]) => Cartesian3.fromDegrees(lon, lat)),
           width: 1,
           arcType: ArcType.GEODESIC,
-          material: color.withAlpha(0.15),
+          material: fa(color, 0.15),
         },
       });
     }
@@ -607,12 +676,16 @@ export class AirspaceScene {
       }
       return c;
     };
-    const tint = (t: Transition) => (t.kind === "missed" ? color.withAlpha(0.55) : color);
+    const focused = procKey(proc) === this.focus;
     /** full volumes for the focused procedure (or for all, if asked); lines at the published limits otherwise */
-    const full = this.opts.volumes || procKey(proc) === this.focus;
+    const full = this.opts.volumes || focused;
+    /** parts within range of the airport; the focused procedure is always shown whole */
+    const clip = (s: Segment) => (focused ? [s] : this.clipSegment(s));
+    const near = (p: ProcPoint) => focused || this.inRange(p.lon!, p.lat!);
+    const tint = (t: Transition) => (t.kind === "missed" ? fa(color, 0.55) : color);
 
     // legs without any published altitude: ground track
-    for (const { item: s, t } of simple.tracks) {
+    for (const { item, t } of simple.tracks) for (const s of clip(item)) {
       ents.add({
         ...common(t),
         polyline: {
@@ -621,24 +694,25 @@ export class AirspaceScene {
           arcType: ArcType.GEODESIC,
           material:
             t.kind === "missed"
-              ? new PolylineDashMaterialProperty({ color: color.withAlpha(0.3), dashLength: 12 })
-              : color.withAlpha(0.35),
+              ? new PolylineDashMaterialProperty({ color: fa(color, 0.3), dashLength: 12 })
+              : fa(color, 0.35),
         },
       });
     }
-    for (const { item: s, t } of simple.volumes) {
+    for (const { item, t } of simple.volumes) for (const s of clip(item)) {
       if (full) this.addSegmentVolume(src, s, tint(t), common(t));
       else this.addSegmentLines(src, s, tint(t), common(t), t.kind === "missed");
     }
-    for (const { item: p, t } of simple.gates) this.addGate(src, p, tint(t), common(t), full);
+    for (const { item: p, t } of simple.gates) if (near(p)) this.addGate(src, p, tint(t), common(t), full);
     if (this.opts.labels) {
       for (const { item: p, t } of simple.fixes) {
+        if (!near(p)) continue;
         ents.add({
           ...common(t),
           position: Cartesian3.fromDegrees(p.lon!, p.lat!),
           point: {
             pixelSize: 3,
-            color: color.withAlpha(0.7),
+            color: fa(color, 0.7),
             disableDepthTestDistance: Number.POSITIVE_INFINITY,
             distanceDisplayCondition: new DistanceDisplayCondition(0, FIX_DISTANCE_M),
           },
@@ -654,7 +728,7 @@ export class AirspaceScene {
    */
   private addSegmentLines(src: CustomDataSource, s: Segment, color: Color, common: object, missed: boolean) {
     const ents = src.entities;
-    const material = missed ? new PolylineDashMaterialProperty({ color, dashLength: 12 }) : color.withAlpha(0.9);
+    const material = missed ? new PolylineDashMaterialProperty({ color, dashLength: 12 }) : fa(color, 0.9);
     const line = (positions: Cartesian3[], width: number, mat: unknown) =>
       ents.add({ ...common, polyline: { positions, width, arcType: ArcType.GEODESIC, material: mat as Color } });
     if (s.glide) {
@@ -665,7 +739,7 @@ export class AirspaceScene {
         line(s.path.map(([lon, lat]) => Cartesian3.fromDegrees(lon, lat, this.h(ft))), 2, material);
       }
     }
-    line(s.path.map(([lon, lat]) => Cartesian3.fromDegrees(lon, lat)), 1, color.withAlpha(0.12));
+    line(s.path.map(([lon, lat]) => Cartesian3.fromDegrees(lon, lat)), 1, fa(color, 0.12));
   }
 
   /**
@@ -685,9 +759,9 @@ export class AirspaceScene {
         polylineVolume: {
           positions: s.glide.map(([lon, lat, ft]) => Cartesian3.fromDegrees(lon, lat, this.h(ft))),
           shape: [new Cartesian2(-w, -th), new Cartesian2(w, -th), new Cartesian2(w, th), new Cartesian2(-w, th)],
-          material: color.withAlpha(0.35),
+          material: fa(color, 0.35),
           outline: true,
-          outlineColor: color.withAlpha(0.8),
+          outlineColor: fa(color, 0.8),
         },
       });
       return;
@@ -698,8 +772,8 @@ export class AirspaceScene {
     const top = s.hi ?? s.lo! + OPEN_FT;
     const fade = s.hi == null ? this.fadeUp : s.lo == null ? this.fadeDown : undefined;
     const wallMaterial = fade
-      ? new ImageMaterialProperty({ image: fade, transparent: true, color: color.withAlpha(0.3) })
-      : color.withAlpha(0.18);
+      ? new ImageMaterialProperty({ image: fade, transparent: true, color: fa(color, 0.3) })
+      : fa(color, 0.18);
     for (const edge of offsetEdges(s.path, half)) {
       ents.add({
         ...common,
@@ -721,7 +795,7 @@ export class AirspaceScene {
           width: 2 * half * NM,
           height: this.h(ft),
           cornerType: CornerType.MITERED,
-          material: color.withAlpha(0.2),
+          material: fa(color, 0.2),
         },
       });
     }
