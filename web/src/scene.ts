@@ -377,9 +377,11 @@ export class AirspaceScene {
     }
   }
 
-  setFocus(key: string | undefined) {
-    if (key === this.focus) return;
-    this.focus = key;
+  /** What to draw, in which color, and which procedure (if any) is focused; redraws once. */
+  setStyle(filter: ProcFilter, colorOf: ColorFn, focus?: string) {
+    this.filter = filter;
+    this.colorOf = colorOf;
+    this.focus = focus;
     const sel = this.viewer.selectedEntity;
     const selName = sel?.name;
     const selProc = sel?.properties?.proc?.getValue();
@@ -392,11 +394,6 @@ export class AirspaceScene {
     }
   }
 
-  setStyle(filter: ProcFilter, colorOf: ColorFn) {
-    this.filter = filter;
-    this.colorOf = colorOf;
-    this.renderAllAirports();
-  }
 
   /** Nationwide airport dots (cheap primitives); procedures are only drawn for active airports. */
   setIndex(airports: IndexAirport[]) {
@@ -562,6 +559,7 @@ export class AirspaceScene {
     }
     // shared across this airport's procedures so common legs and labels are drawn once
     const drawn = newDrawn();
+    const lines = newDrawn(true);
     const ghosts = newDrawn();
     this.origin = [a.lon, a.lat];
     for (const proc of file.procedures) {
@@ -569,7 +567,7 @@ export class AirspaceScene {
       if (!ts.length) continue;
       const color = Color.fromCssColorString(this.colorOf(proc));
       if (this.focus && procKey(proc) !== this.focus) this.addGhost(src, proc, ts, color, ghosts);
-      else this.addProcedure(src, proc, ts, color, drawn);
+      else this.addProcedure(src, proc, ts, color, drawn, lines);
     }
     ents.resumeEvents();
   }
@@ -659,9 +657,19 @@ export class AirspaceScene {
     }
   }
 
-  private addProcedure(src: CustomDataSource, proc: Procedure, ts: Transition[], color: Color, drawn: Drawn) {
+  private addProcedure(
+    src: CustomDataSource,
+    proc: Procedure,
+    ts: Transition[],
+    color: Color,
+    drawn: Drawn,
+    lines: Drawn,
+  ) {
     const ents = src.entities;
-    const simple = simplify(proc, ts, drawn);
+    const focused = procKey(proc) === this.focus;
+    /** full volumes for the focused procedure (or for all, if asked); one line per ground path otherwise */
+    const full = this.opts.volumes || focused;
+    const simple = simplify(proc, ts, full ? drawn : lines);
     const properties = { proc: procKey(proc) };
     const info = new Map<Transition, { name: string; description: string; properties: object }>();
     const common = (t: Transition) => {
@@ -676,9 +684,6 @@ export class AirspaceScene {
       }
       return c;
     };
-    const focused = procKey(proc) === this.focus;
-    /** full volumes for the focused procedure (or for all, if asked); lines at the published limits otherwise */
-    const full = this.opts.volumes || focused;
     /** parts within range of the airport; the focused procedure is always shown whole */
     const clip = (s: Segment) => (focused ? [s] : this.clipSegment(s));
     const near = (p: ProcPoint) => focused || this.inRange(p.lon!, p.lat!);
@@ -723,23 +728,22 @@ export class AirspaceScene {
   }
 
   /**
-   * Overview form of a leg: a line at each published limit (or along the published vertical
-   * path), plus a faint ground shadow so the line can be placed over the map.
+   * Overview form of a leg: one line, along the published vertical path if there is one,
+   * else at the lowest published limit (the highest when only a ceiling is published).
    */
   private addSegmentLines(src: CustomDataSource, s: Segment, color: Color, common: object, missed: boolean) {
-    const ents = src.entities;
-    const material = missed ? new PolylineDashMaterialProperty({ color, dashLength: 12 }) : fa(color, 0.9);
-    const line = (positions: Cartesian3[], width: number, mat: unknown) =>
-      ents.add({ ...common, polyline: { positions, width, arcType: ArcType.GEODESIC, material: mat as Color } });
-    if (s.glide) {
-      line(s.glide.map(([lon, lat, ft]) => Cartesian3.fromDegrees(lon, lat, this.h(ft))), 3, material);
-    } else {
-      for (const ft of [s.lo, s.hi]) {
-        if (ft == null) continue;
-        line(s.path.map(([lon, lat]) => Cartesian3.fromDegrees(lon, lat, this.h(ft))), 2, material);
-      }
-    }
-    line(s.path.map(([lon, lat]) => Cartesian3.fromDegrees(lon, lat)), 1, fa(color, 0.12));
+    const positions = s.glide
+      ? s.glide.map(([lon, lat, ft]) => Cartesian3.fromDegrees(lon, lat, this.h(ft)))
+      : s.path.map(([lon, lat]) => Cartesian3.fromDegrees(lon, lat, this.h((s.lo ?? s.hi)!)));
+    src.entities.add({
+      ...common,
+      polyline: {
+        positions,
+        width: s.glide ? 2.5 : 2,
+        arcType: ArcType.GEODESIC,
+        material: missed ? new PolylineDashMaterialProperty({ color, dashLength: 12 }) : fa(color, 0.85),
+      },
+    });
   }
 
   /**

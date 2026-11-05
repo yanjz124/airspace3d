@@ -88,6 +88,8 @@ function Explorer({ index }: { index: DataIndex }) {
   });
   const [types, setTypes] = useState<Record<ProcType, boolean>>({ SID: true, STAR: true, IAP: false });
   const [showDisplay, setShowDisplay] = useState(false);
+  /** enroute transitions are the long spokes out to distant fixes; off by default */
+  const [enroute, setEnroute] = useState(false);
   const [colorBy, setColorBy] = useState<"airport" | "type">("type");
   const [query, setQuery] = useState("");
   const [hardFilter, setHardFilter] = useState<HardFilter>("any");
@@ -129,7 +131,6 @@ function Explorer({ index }: { index: DataIndex }) {
   }, [index]);
 
   useEffect(() => scene.current?.setOptions(opts), [opts]);
-  useEffect(() => scene.current?.setFocus(focus), [focus]);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && setFocus(undefined);
     window.addEventListener("keydown", onKey);
@@ -171,12 +172,16 @@ function Explorer({ index }: { index: DataIndex }) {
     scene.current?.setStyle(
       (p: Procedure) => {
         if (!types[p.type] || !passesHard(p, hardFilter)) return [];
-        if (p.transitions.length === 1) return hidden.has(procKey(p)) ? [] : p.transitions;
-        return p.transitions.filter((_, i) => !hidden.has(transKey(p, i)));
+        const shown = p.transitions.length === 1
+          ? (hidden.has(procKey(p)) ? [] : p.transitions)
+          : p.transitions.filter((_, i) => !hidden.has(transKey(p, i)));
+        const all = enroute || procKey(p) === focus;
+        return all ? shown : shown.filter((t) => t.kind !== "enroute");
       },
       (p) => (colorBy === "airport" ? airportColor(p.airport) : TYPE_COLORS[p.type]),
+      focus,
     );
-  }, [types, hidden, colorBy, hardFilter]);
+  }, [types, hidden, colorBy, hardFilter, enroute, focus]);
 
   // tree: checked = every leaf in view that is not hidden
   const allLeaves = useMemo(
@@ -318,6 +323,14 @@ function Explorer({ index }: { index: DataIndex }) {
               Display options
             </Button>
           </Group>
+          <Switch
+            size="xs"
+            mt="sm"
+            label="Enroute transitions"
+            description="The spokes out to distant fixes; a focused procedure always shows them"
+            checked={enroute}
+            onChange={(e) => setEnroute(e.currentTarget.checked)}
+          />
           <Text size="xs" mt="sm" mb={2}>
             Show procedures within{" "}
             <b>{opts.rangeNm == null ? "any distance" : `${opts.rangeNm} NM`}</b> of the airport
@@ -506,9 +519,9 @@ function Legend({ colorBy, types }: { colorBy: "airport" | "type"; types: Record
             </Group>
           ))}
           <Text size="xs" mt={4}>● altitude restriction at a fix</Text>
-          <Text size="xs">━ line in the air: published altitude limit</Text>
+          <Text size="xs">━ line in the air: lowest published altitude</Text>
           <Text size="xs">╱ sloped line: glidepath</Text>
-          <Text size="xs">─ faint line on the ground: track only</Text>
+          <Text size="xs">─ faint line on the ground: no published altitude</Text>
           <Text size="xs">┄ dashed: missed approach</Text>
           <Text size="xs" c="dimmed" mt={4}>
             Click a procedure to see its legal altitude band: solid edges are published limits, fading edges have none
