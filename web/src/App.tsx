@@ -519,7 +519,7 @@ function Legend({ colorBy, types }: { colorBy: "airport" | "type"; types: Record
             </Group>
           ))}
           <Text size="xs" mt={4}>● altitude restriction at a fix (focused procedure)</Text>
-          <Text size="xs">━ line in the air: lowest published altitude</Text>
+          <Text size="xs">━ line in the air: lowest published altitude, shaded down to the ground</Text>
           <Text size="xs">╱ sloped line: glidepath</Text>
           <Text size="xs">─ faint line on the ground: no published altitude</Text>
           <Text size="xs">┄ dashed: missed approach</Text>
