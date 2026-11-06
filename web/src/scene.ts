@@ -52,6 +52,13 @@ const OPEN_FT = 1500;
 const NOMINAL_HALF_NM = 0.3;
 /** Thickness of the glidepath volume, in feet (before exaggeration). */
 const GLIDE_THICK_FT = 100;
+/** Cross-section of the overview tubes: a circle, radius in metres. */
+const TUBE_RADIUS_M = 400;
+const TUBE_SHAPE = Array.from({ length: 12 }, (_, i) => {
+  const t = (i / 12) * 2 * Math.PI;
+  return new Cartesian2(TUBE_RADIUS_M * Math.cos(t), TUBE_RADIUS_M * Math.sin(t));
+});
+
 /** Unrestricted fixes are shown only within this camera distance (m). */
 const FIX_DISTANCE_M = 40_000;
 /** Camera distance (m) up to which airport labels are shown, by surface airspace class. */
@@ -733,16 +740,22 @@ export class AirspaceScene {
    */
   private addSegmentLines(src: CustomDataSource, s: Segment, color: Color, common: object, missed: boolean) {
     const pts: [number, number, number][] = s.glide ?? s.path.map(([lon, lat]) => [lon, lat, (s.lo ?? s.hi)!]);
-    src.entities.add({
-      ...common,
-      polyline: {
-        positions: pts.map(([lon, lat, ft]) => Cartesian3.fromDegrees(lon, lat, this.h(ft))),
-        width: s.glide ? 2.5 : 2,
-        arcType: ArcType.GEODESIC,
-        material: missed ? new PolylineDashMaterialProperty({ color, dashLength: 12 }) : fa(color, 0.9),
-      },
-    });
-    if (missed) return;
+    const positions = pts.map(([lon, lat, ft]) => Cartesian3.fromDegrees(lon, lat, this.h(ft)));
+    if (missed) {
+      src.entities.add({
+        ...common,
+        polyline: { positions, width: 2, arcType: ArcType.GEODESIC, material: new PolylineDashMaterialProperty({ color, dashLength: 12 }) },
+      });
+      return;
+    }
+    // a shaded tube: thick enough to see from a distance, and its lighting shows it is in the air
+    const tube = positions.filter((p, i) => i === 0 || !Cartesian3.equalsEpsilon(p, positions[i - 1], 0, 1));
+    if (tube.length >= 2) {
+      src.entities.add({
+        ...common,
+        polylineVolume: { positions: tube, shape: TUBE_SHAPE, cornerType: CornerType.ROUNDED, material: fa(color, 0.95) },
+      });
+    }
     src.entities.add({
       ...common,
       wall: {
