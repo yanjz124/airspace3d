@@ -728,19 +728,28 @@ export class AirspaceScene {
 
   /**
    * Overview form of a leg: one line, along the published vertical path if there is one,
-   * else at the lowest published limit (the highest when only a ceiling is published).
+   * else at the lowest published limit (the highest when only a ceiling is published),
+   * with a faint curtain down to the ground so its height reads at a glance.
    */
   private addSegmentLines(src: CustomDataSource, s: Segment, color: Color, common: object, missed: boolean) {
-    const positions = s.glide
-      ? s.glide.map(([lon, lat, ft]) => Cartesian3.fromDegrees(lon, lat, this.h(ft)))
-      : s.path.map(([lon, lat]) => Cartesian3.fromDegrees(lon, lat, this.h((s.lo ?? s.hi)!)));
+    const pts: [number, number, number][] = s.glide ?? s.path.map(([lon, lat]) => [lon, lat, (s.lo ?? s.hi)!]);
     src.entities.add({
       ...common,
       polyline: {
-        positions,
+        positions: pts.map(([lon, lat, ft]) => Cartesian3.fromDegrees(lon, lat, this.h(ft))),
         width: s.glide ? 2.5 : 2,
         arcType: ArcType.GEODESIC,
-        material: missed ? new PolylineDashMaterialProperty({ color, dashLength: 12 }) : fa(color, 0.85),
+        material: missed ? new PolylineDashMaterialProperty({ color, dashLength: 12 }) : fa(color, 0.9),
+      },
+    });
+    if (missed) return;
+    src.entities.add({
+      ...common,
+      wall: {
+        positions: Cartesian3.fromDegreesArray(pts.flatMap(([lon, lat]) => [lon, lat])),
+        maximumHeights: pts.map(([, , ft]) => this.h(ft)),
+        minimumHeights: pts.map(() => 0),
+        material: new ImageMaterialProperty({ image: this.fadeDown, transparent: true, color: fa(color, 0.22) }),
       },
     });
   }

@@ -25,7 +25,8 @@ Viewing:
 - Procedures are drawn for the few airports nearest the view center (within a radius
   that grows with camera height), so one terminal area is shown at a time.
 - In the overview each ground path is drawn once, as a line at its lowest published
-  limit or along its glidepath; enroute transitions are off unless switched on. Click a
+  limit or along its glidepath, with a faint curtain down to the ground so its height
+  reads at a glance; enroute transitions are off unless switched on. Click a
   procedure (in the scene or the list) to focus it: it is drawn as its full altitude
   band and everything else fades to faint ground tracks. Esc or "Show all" returns.
   "Volumes for every procedure" under Display options draws all bands at once.
