@@ -753,7 +753,8 @@ export class AirspaceScene {
     if (tube.length >= 2) {
       src.entities.add({
         ...common,
-        polylineVolume: { positions: tube, shape: TUBE_SHAPE, cornerType: CornerType.ROUNDED, material: fa(color, 0.95) },
+        // fully opaque: any translucency puts tubes in an unsorted pass and they show through each other
+        polylineVolume: { positions: tube, shape: TUBE_SHAPE, cornerType: CornerType.ROUNDED, material: color.withAlpha(1) },
       });
     }
     src.entities.add({
