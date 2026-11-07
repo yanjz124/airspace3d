@@ -78,7 +78,6 @@ function Explorer({ index }: { index: DataIndex }) {
   const [opts, setOpts] = useState<DisplayOptions>({
     exaggeration: 3,
     labels: true,
-    volumes: false,
     rnavSpec: false,
     rangeNm: 40,
     classB: true,
@@ -355,13 +354,6 @@ function Explorer({ index }: { index: DataIndex }) {
             <Stack gap={8} mt="sm">
               <Switch
                 size="xs"
-                label="Volumes for every procedure"
-                description="Legal altitude band from published restrictions; open sides fade. Off: only the focused procedure"
-                checked={opts.volumes}
-                onChange={(e) => set("volumes", e.currentTarget.checked)}
-              />
-              <Switch
-                size="xs"
                 label="RNAV 1 width on RNAV SIDs/STARs"
                 description="Charted nav spec, not coded per leg (else nominal width)"
                 checked={opts.rnavSpec}
@@ -518,14 +510,15 @@ function Legend({ colorBy, types }: { colorBy: "airport" | "type"; types: Record
               <Text size="xs">Class {c} airspace</Text>
             </Group>
           ))}
-          <Text size="xs" mt={4}>● altitude restriction at a fix (focused procedure)</Text>
-          <Text size="xs">━ tube in the air: lowest published altitude, shaded down to the ground</Text>
-          <Text size="xs">╱ sloped tube: glidepath</Text>
+          <Text size="xs" mt={4}>▭ channel: legal altitude band from published restrictions</Text>
+          <Text size="xs">▬ solid floor / ceiling: published limit</Text>
+          <Text size="xs">░ fading open side: no published limit (at or above / at or below)</Text>
+          <Text size="xs">╱ sloped: glidepath</Text>
           <Text size="xs">─ faint line on the ground: no published altitude</Text>
           <Text size="xs">┄ dashed: missed approach</Text>
           <Text size="xs" c="dimmed" mt={4}>
-            Click a procedure to see its legal altitude band: solid edges are published limits, fading edges have none
-            (arrivals only descend, departures only climb).
+            Arrivals only descend and departures only climb, so open sides reach the next leg's limit. Click a
+            procedure to focus it and see its restriction points.
           </Text>
         </Stack>
       )}

@@ -44,6 +44,9 @@ export interface Segment {
   rnpSrc?: "coded" | "spec";
   /** [lon, lat, ft] along a published vertical path (glideslope / VPA) */
   glide?: [number, number, number][];
+  /** display band (feet), set by the viewer: published limits, with open sides extended to meet neighbors */
+  dlo?: number;
+  dhi?: number;
 }
 
 export interface Transition {

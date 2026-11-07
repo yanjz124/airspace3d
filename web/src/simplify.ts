@@ -20,7 +20,34 @@ export interface SimplifiedProcedure {
 
 const same = (a: [number, number], b: [number, number]) => a[0] === b[0] && a[1] === b[1];
 const segKey = (s: Segment) =>
-  `${s.path[0]}|${s.path[s.path.length - 1]}|${s.path.length}|${s.lo}|${s.hi}|${s.rnp ?? ""}|${s.glide ? "g" : ""}`;
+  `${s.path[0]}|${s.path[s.path.length - 1]}|${s.path.length}|${s.lo}|${s.hi}|${s.dlo}|${s.dhi}|${s.rnp ?? ""}|${s.glide ? "g" : ""}`;
+
+/** How far an open side (no published limit) extends at least, in feet. */
+const OPEN_FT = 1500;
+/** Minimum drawn thickness of a band, in feet, so an "at" altitude is not a flat sheet. */
+const MIN_FT = 600;
+
+/**
+ * Display band for each leg of a transition. Published limits are kept; a side without one is
+ * extended at least OPEN_FT, and as far as the neighboring legs' published limits, so a step
+ * down (arrivals) or up (departures) between legs joins up instead of leaving a gap.
+ */
+export function setDisplayBands(t: Transition) {
+  const segs = t.segments;
+  segs.forEach((s, i) => {
+    if (s.glide || (s.lo == null && s.hi == null)) return;
+    const near = [segs[i - 1], segs[i + 1]].flatMap((n) => (n && !n.glide ? [n.lo, n.hi] : [])).filter((x) => x != null);
+    let lo = s.lo ?? Math.max(0, Math.min(s.hi! - OPEN_FT, ...near.filter((x) => x < s.hi!)));
+    let hi = s.hi ?? Math.max(s.lo! + OPEN_FT, ...near.filter((x) => x > s.lo!));
+    if (hi - lo < MIN_FT) {
+      const mid = (lo + hi) / 2;
+      lo = Math.max(0, mid - MIN_FT / 2);
+      hi = lo + MIN_FT;
+    }
+    s.dlo = lo;
+    s.dhi = hi;
+  });
+}
 const hasBand = (s: Segment) => !!s.glide || s.lo != null || s.hi != null;
 
 /** Can `b` continue `a` as one volume? */
@@ -30,6 +57,8 @@ function mergeable(a: Segment, b: Segment): boolean {
     !b.glide &&
     a.lo === b.lo &&
     a.hi === b.hi &&
+    a.dlo === b.dlo &&
+    a.dhi === b.dhi &&
     a.rnp === b.rnp &&
     a.rnpSrc === b.rnpSrc &&
     same(a.path[a.path.length - 1], b.path[0])
@@ -45,12 +74,8 @@ export interface Drawn {
   segs: Set<string>;
   gates: Set<string>;
   fixes: Set<string>;
-  /** dedupe legs by ground path alone, so a path flown at several altitudes is drawn once */
-  byPath: boolean;
 }
-export const newDrawn = (byPath = false): Drawn => ({ segs: new Set(), gates: new Set(), fixes: new Set(), byPath });
-
-const pathKey = (s: Segment) => s.path.map(([x, y]) => `${x.toFixed(4)},${y.toFixed(4)}`).join(";");
+export const newDrawn = (): Drawn => ({ segs: new Set(), gates: new Set(), fixes: new Set() });
 
 export function simplify(proc: Procedure, transitions: Transition[], drawn: Drawn = newDrawn()): SimplifiedProcedure {
   const seen = drawn.segs;
@@ -58,9 +83,10 @@ export function simplify(proc: Procedure, transitions: Transition[], drawn: Draw
   const tracks: Tagged<Segment>[] = [];
 
   for (const t of transitions) {
+    setDisplayBands(t);
     let run: Tagged<Segment> | undefined;
     for (const s of t.segments) {
-      const key = drawn.byPath ? pathKey(s) : segKey(s);
+      const key = segKey(s);
       if (seen.has(key)) {
         run = undefined; // drawn by another transition; break the run here
         continue;
