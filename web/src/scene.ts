@@ -46,19 +46,10 @@ import { newDrawn, simplify, type Drawn } from "./simplify";
 
 const FT = 0.3048;
 const NM = 1852;
-/** How far an open-ended band (no published limit on one side) is drawn before it has faded out, in feet. */
-const OPEN_FT = 1500;
 /** Half-width used when a leg has no RNP value: purely a display width. */
 const NOMINAL_HALF_NM = 0.3;
 /** Thickness of the glidepath volume, in feet (before exaggeration). */
 const GLIDE_THICK_FT = 100;
-/** Cross-section of the overview tubes: a circle, radius in metres. */
-const TUBE_RADIUS_M = 400;
-const TUBE_SHAPE = Array.from({ length: 12 }, (_, i) => {
-  const t = (i / 12) * 2 * Math.PI;
-  return new Cartesian2(TUBE_RADIUS_M * Math.cos(t), TUBE_RADIUS_M * Math.sin(t));
-});
-
 /** Unrestricted fixes are shown only within this camera distance (m). */
 const FIX_DISTANCE_M = 40_000;
 /** Camera distance (m) up to which airport labels are shown, by surface airspace class. */
@@ -77,8 +68,6 @@ export const AIRSPACE_COLORS: Record<string, string> = {
 export interface DisplayOptions {
   exaggeration: number;
   labels: boolean;
-  /** 3D procedure volumes at their published altitude band */
-  volumes: boolean;
   /** use RNAV 1 width for RNAV SIDs/STARs, whose legs carry no coded RNP */
   rnavSpec: boolean;
   /** NM from the airport beyond which procedure legs are cut off; null = no limit */
@@ -381,7 +370,6 @@ export class AirspaceScene {
     if (
       prev.exaggeration !== opts.exaggeration ||
       prev.labels !== opts.labels ||
-      prev.volumes !== opts.volumes ||
       prev.rnavSpec !== opts.rnavSpec ||
       prev.rangeNm !== opts.rangeNm
     ) {
@@ -439,7 +427,6 @@ export class AirspaceScene {
         verticalOrigin: VerticalOrigin.CENTER,
         horizontalOrigin: HorizontalOrigin.CENTER,
         distanceDisplayCondition: new DistanceDisplayCondition(0, AIRPORT_LABEL_M[cls]),
-        disableDepthTestDistance: Number.POSITIVE_INFINITY,
       });
     }
   }
@@ -563,7 +550,6 @@ export class AirspaceScene {
     }
     // shared across this airport's procedures so common legs and labels are drawn once
     const drawn = newDrawn();
-    const lines = newDrawn(true);
     const ghosts = newDrawn();
     this.origin = [a.lon, a.lat];
     for (const proc of file.procedures) {
@@ -571,7 +557,7 @@ export class AirspaceScene {
       if (!ts.length) continue;
       const color = Color.fromCssColorString(this.colorOf(proc));
       if (this.focus && procKey(proc) !== this.focus) this.addGhost(src, proc, ts, color, ghosts);
-      else this.addProcedure(src, proc, ts, color, drawn, lines);
+      else this.addProcedure(src, proc, ts, color, drawn);
     }
     ents.resumeEvents();
   }
@@ -667,13 +653,10 @@ export class AirspaceScene {
     ts: Transition[],
     color: Color,
     drawn: Drawn,
-    lines: Drawn,
   ) {
     const ents = src.entities;
     const focused = procKey(proc) === this.focus;
-    /** full volumes for the focused procedure (or for all, if asked); one line per ground path otherwise */
-    const full = this.opts.volumes || focused;
-    const simple = simplify(proc, ts, full ? drawn : lines);
+    const simple = simplify(proc, ts, drawn);
     const properties = { proc: procKey(proc) };
     const info = new Map<Transition, { name: string; description: string; properties: object }>();
     const common = (t: Transition) => {
@@ -709,17 +692,16 @@ export class AirspaceScene {
       });
     }
     for (const { item, t } of simple.volumes) for (const s of clip(item)) {
-      if (full) this.addSegmentVolume(src, s, tint(t), common(t));
-      else this.addSegmentLines(src, s, tint(t), common(t), t.kind === "missed");
+      this.addSegmentVolume(src, s, tint(t), common(t));
     }
-    for (const { item: p, t } of simple.gates) if (near(p)) this.addGate(src, p, tint(t), common(t), full);
+    for (const { item: p, t } of simple.gates) if (near(p)) this.addGate(src, p, tint(t), common(t), focused);
     if (this.opts.labels) {
       for (const { item: p, t } of simple.fixes) {
         if (!near(p)) continue;
         ents.add({
           ...common(t),
           position: Cartesian3.fromDegrees(p.lon!, p.lat!),
-          point: full
+          point: focused
             ? {
                 pixelSize: 3,
                 color: fa(color, 0.7),
@@ -731,41 +713,6 @@ export class AirspaceScene {
         });
       }
     }
-  }
-
-  /**
-   * Overview form of a leg: one line, along the published vertical path if there is one,
-   * else at the lowest published limit (the highest when only a ceiling is published),
-   * with a faint curtain down to the ground so its height reads at a glance.
-   */
-  private addSegmentLines(src: CustomDataSource, s: Segment, color: Color, common: object, missed: boolean) {
-    const pts: [number, number, number][] = s.glide ?? s.path.map(([lon, lat]) => [lon, lat, (s.lo ?? s.hi)!]);
-    const positions = pts.map(([lon, lat, ft]) => Cartesian3.fromDegrees(lon, lat, this.h(ft)));
-    if (missed) {
-      src.entities.add({
-        ...common,
-        polyline: { positions, width: 2, arcType: ArcType.GEODESIC, material: new PolylineDashMaterialProperty({ color, dashLength: 12 }) },
-      });
-      return;
-    }
-    // a shaded tube: thick enough to see from a distance, and its lighting shows it is in the air
-    const tube = positions.filter((p, i) => i === 0 || !Cartesian3.equalsEpsilon(p, positions[i - 1], 0, 1));
-    if (tube.length >= 2) {
-      src.entities.add({
-        ...common,
-        // fully opaque: any translucency puts tubes in an unsorted pass and they show through each other
-        polylineVolume: { positions: tube, shape: TUBE_SHAPE, cornerType: CornerType.ROUNDED, material: color.withAlpha(1) },
-      });
-    }
-    src.entities.add({
-      ...common,
-      wall: {
-        positions: Cartesian3.fromDegreesArray(pts.flatMap(([lon, lat]) => [lon, lat])),
-        maximumHeights: pts.map(([, , ft]) => this.h(ft)),
-        minimumHeights: pts.map(() => 0),
-        material: new ImageMaterialProperty({ image: this.fadeDown, transparent: true, color: fa(color, 0.22) }),
-      },
-    });
   }
 
   /**
@@ -792,14 +739,16 @@ export class AirspaceScene {
       });
       return;
     }
-    if (s.lo == null && s.hi == null) return; // nothing published: track only
+    if (s.dlo == null || s.dhi == null) return; // nothing published: track only
 
-    const bottom = s.lo ?? s.hi! - OPEN_FT;
-    const top = s.hi ?? s.lo! + OPEN_FT;
+    // a rectangular channel: side walls over the display band, a floor/ceiling only where a
+    // limit is published; the side without one is left open and the walls fade toward it
+    const bottom = s.dlo;
+    const top = s.dhi;
     const fade = s.hi == null ? this.fadeUp : s.lo == null ? this.fadeDown : undefined;
     const wallMaterial = fade
-      ? new ImageMaterialProperty({ image: fade, transparent: true, color: fa(color, 0.3) })
-      : fa(color, 0.18);
+      ? new ImageMaterialProperty({ image: fade, transparent: true, color: fa(color, 0.55) })
+      : fa(color, 0.4);
     for (const edge of offsetEdges(s.path, half)) {
       ents.add({
         ...common,
@@ -821,13 +770,13 @@ export class AirspaceScene {
           width: 2 * half * NM,
           height: this.h(ft),
           cornerType: CornerType.MITERED,
-          material: fa(color, 0.2),
+          material: fa(color, 0.45),
         },
       });
     }
   }
 
-  /** Restriction at a fix: a label at the limit; dots too when drawn in full (focused). */
+  /** Restriction at a fix: a label at the limit; dots too on the focused procedure. */
   private addGate(src: CustomDataSource, p: ProcPoint, color: Color, common: object, full: boolean) {
     const ents = src.entities;
     const a = p.alt!;
