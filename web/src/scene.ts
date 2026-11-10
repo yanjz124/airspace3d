@@ -134,7 +134,11 @@ function offsetEdges(path: [number, number][], half: number): [[number, number][
 /** Scale a color's existing alpha, so a faded color stays faded through every material. */
 const fa = (c: Color, a: number) => c.withAlpha(c.alpha * a);
 
-/** Vertical alpha gradients for wall textures (t = 0 at the bottom of a wall). */
+/**
+ * Vertical gradients for the walls of a channel's open side (t = 0 at the bottom of a wall).
+ * Opaque: they shade from full color to near-black instead of fading to transparent, because
+ * translucent walls are drawn unsorted and show through one another.
+ */
 function gradient(kind: "fadeUp" | "fadeDown"): HTMLCanvasElement {
   const c = document.createElement("canvas");
   c.width = 4;
@@ -143,7 +147,7 @@ function gradient(kind: "fadeUp" | "fadeDown"): HTMLCanvasElement {
   // canvas y grows downwards; the wall's top maps to canvas y = 0
   const grad = g.createLinearGradient(0, 0, 0, 256);
   const solid = "rgba(255,255,255,1)";
-  const clear = "rgba(255,255,255,0)";
+  const clear = "rgb(40,40,40)";
   if (kind === "fadeUp") {
     grad.addColorStop(0, clear);
     grad.addColorStop(1, solid);
@@ -732,9 +736,7 @@ export class AirspaceScene {
         polylineVolume: {
           positions: s.glide.map(([lon, lat, ft]) => Cartesian3.fromDegrees(lon, lat, this.h(ft))),
           shape: [new Cartesian2(-w, -th), new Cartesian2(w, -th), new Cartesian2(w, th), new Cartesian2(-w, th)],
-          material: fa(color, 0.35),
-          outline: true,
-          outlineColor: fa(color, 0.8),
+          material: color.withAlpha(1),
         },
       });
       return;
@@ -747,8 +749,8 @@ export class AirspaceScene {
     const top = s.dhi;
     const fade = s.hi == null ? this.fadeUp : s.lo == null ? this.fadeDown : undefined;
     const wallMaterial = fade
-      ? new ImageMaterialProperty({ image: fade, transparent: true, color: fa(color, 0.55) })
-      : fa(color, 0.4);
+      ? new ImageMaterialProperty({ image: fade, transparent: false, color: color.withAlpha(1) })
+      : color.withAlpha(1);
     for (const edge of offsetEdges(s.path, half)) {
       ents.add({
         ...common,
@@ -770,7 +772,7 @@ export class AirspaceScene {
           width: 2 * half * NM,
           height: this.h(ft),
           cornerType: CornerType.MITERED,
-          material: fa(color, 0.45),
+          material: color.withAlpha(1),
         },
       });
     }
