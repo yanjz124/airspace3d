@@ -25,7 +25,7 @@ Viewing:
 - Procedures are drawn for the few airports nearest the view center (within a radius
   that grows with camera height), so one terminal area is shown at a time.
 - Each leg is a rectangular channel over its legal altitude band: a floor or ceiling
-  where a limit is published, an open, fading side where it is not ("at or above" /
+  where a limit is published, an open side shading to dark where it is not ("at or above" /
   "at or below"). An open side extends at least 1500 ft and up to the neighboring
   legs' limits so steps join up; "at" altitudes are at least 600 ft thick.
   Enroute transitions are off unless switched on. Click a procedure (in the scene or

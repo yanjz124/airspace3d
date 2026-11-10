@@ -512,7 +512,7 @@ function Legend({ colorBy, types }: { colorBy: "airport" | "type"; types: Record
           ))}
           <Text size="xs" mt={4}>▭ channel: legal altitude band from published restrictions</Text>
           <Text size="xs">▬ solid floor / ceiling: published limit</Text>
-          <Text size="xs">░ fading open side: no published limit (at or above / at or below)</Text>
+          <Text size="xs">░ side shading to dark: open, no published limit (at or above / at or below)</Text>
           <Text size="xs">╱ sloped: glidepath</Text>
           <Text size="xs">─ faint line on the ground: no published altitude</Text>
           <Text size="xs">┄ dashed: missed approach</Text>
