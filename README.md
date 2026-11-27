@@ -29,8 +29,13 @@ Viewing:
   "at or below"). An open side extends at least 1500 ft and up to the neighboring
   legs' limits so steps join up; "at" altitudes are at least 600 ft thick.
   Enroute transitions are off unless switched on. Click a procedure (in the scene or
-  the list) to focus it: everything else fades to faint ground tracks and its
-  restriction points are marked. Esc or "Show all" returns.
+  the list) to focus it: its restriction points are marked, and every loaded
+  procedure that crosses it in plan view is listed with the vertical relationship
+  at the crossings, from published limits only: a gap ("1,000 ft below") when the
+  limits keep them apart, or "no published separation" when an open side or
+  overlapping bands leave it to ATC. Crossings are marked with a white (gap) or
+  amber (none) bar; procedures kept apart somewhere stay fully drawn, the rest fade
+  to faint ground tracks. Esc or "Show all" returns.
 - The range slider (default 40 NM) cuts procedures off at that distance from their
   airport; a focused procedure is always drawn whole.
 

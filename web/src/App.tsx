@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AppShell,
   Badge,
@@ -28,6 +28,7 @@ import { IconChevronDown, IconPlaneDeparture, IconSearch } from "@tabler/icons-r
 import { AIRSPACE_COLORS, AirspaceScene, type DisplayOptions, type ViewInfo } from "./scene";
 import { buildTree, procLeaves, TYPE_LABEL } from "./procTree";
 import { hasHardRestriction } from "./simplify";
+import { findRelations, type Relation } from "./relations";
 import { AIRSPACE_MAX_HEIGHT, loadAirport, loadAirspace, pickAirports, PROC_MAX_HEIGHT } from "./loader";
 import type { AirportFile, DataIndex, ProcType, Procedure, SurfaceClass } from "./types";
 import { procKey, transKey } from "./types";
@@ -140,11 +141,19 @@ function Explorer({ index }: { index: DataIndex }) {
     if (focus && !active.some((f) => focus.startsWith(`${f.airport.id}/`))) setFocus(undefined);
   }, [active, focus]);
 
+  /** airports of the procedures crossing the focused one (set once relations are known) */
+  const [relAirports, setRelAirports] = useState("");
+  /** always loaded: a picked airport, the focused procedure's, and those crossing it */
+  const keepAirports = useMemo(
+    () => [...new Set([pinned, focus?.split("/")[0], ...relAirports.split(",")].filter((x): x is string => !!x))],
+    [pinned, focus, relAirports],
+  );
+
   // load procedures for airports in view
   useEffect(() => {
     if (!view) return;
     let cancelled = false;
-    const ids = pickAirports(index, view, types, new Set(classes), pinned);
+    const ids = pickAirports(index, view, types, new Set(classes), keepAirports);
     setLoading(true);
     Promise.allSettled(ids.map(loadAirport)).then((rs) => {
       if (cancelled) return;
@@ -159,28 +168,51 @@ function Explorer({ index }: { index: DataIndex }) {
     return () => {
       cancelled = true;
     };
-  }, [index, view, types, classes, pinned]);
+  }, [index, view, types, classes, keepAirports]);
 
   useEffect(() => {
     const on = new Set(classes);
     scene.current?.setAirportFilter((a) => on.has(a[8]) || a[0] === pinned);
   }, [classes, pinned]);
 
+  /** the transitions of a procedure to draw */
+  const procFilter = useCallback(
+    (p: Procedure) => {
+      if (!types[p.type] || !passesHard(p, hardFilter)) return [];
+      const shown = p.transitions.length === 1
+        ? (hidden.has(procKey(p)) ? [] : p.transitions)
+        : p.transitions.filter((_, i) => !hidden.has(transKey(p, i)));
+      const all = enroute || procKey(p) === focus;
+      return all ? shown : shown.filter((t) => t.kind !== "enroute");
+    },
+    [types, hidden, hardFilter, enroute, focus],
+  );
+
+  /** procedures crossing the focused one, and how their published altitudes relate there */
+  const relations = useMemo(() => {
+    if (!focus) return [];
+    const procs = active.flatMap((f) => f.procedures);
+    const focused = procs.find((p) => procKey(p) === focus);
+    if (!focused) return [];
+    const others = procs.map((proc) => ({ proc, ts: procFilter(proc) })).filter((o) => o.ts.length);
+    return findRelations(focused, focused.transitions, others);
+  }, [focus, active, procFilter]);
+
+  useEffect(() => {
+    setRelAirports([...new Set(relations.map((r) => r.proc.airport))].sort().join(","));
+  }, [relations]);
+
   // what to draw and in which color
   useEffect(() => {
     scene.current?.setStyle(
-      (p: Procedure) => {
-        if (!types[p.type] || !passesHard(p, hardFilter)) return [];
-        const shown = p.transitions.length === 1
-          ? (hidden.has(procKey(p)) ? [] : p.transitions)
-          : p.transitions.filter((_, i) => !hidden.has(transKey(p, i)));
-        const all = enroute || procKey(p) === focus;
-        return all ? shown : shown.filter((t) => t.kind !== "enroute");
-      },
+      procFilter,
       (p) => (colorBy === "airport" ? airportColor(p.airport) : TYPE_COLORS[p.type]),
       focus,
+      // drawn in full: those the published limits keep apart from it somewhere
+      new Set(relations.filter((r) => r.minGap != null).map((r) => r.key)),
     );
-  }, [types, hidden, colorBy, hardFilter, enroute, focus]);
+    scene.current?.setRelations(relations);
+  }, [procFilter, colorBy, focus, relations]);
 
   // tree: checked = every leaf in view that is not hidden
   const allLeaves = useMemo(
@@ -461,6 +493,7 @@ function Explorer({ index }: { index: DataIndex }) {
                   Show all (Esc)
                 </Button>
               </Group>
+              <Relations relations={relations} onPick={setFocus} />
             </Paper>
           </AppShell.Section>
         )}
@@ -516,12 +549,64 @@ function Legend({ colorBy, types }: { colorBy: "airport" | "type"; types: Record
           <Text size="xs">╱ sloped: glidepath</Text>
           <Text size="xs">─ faint line on the ground: no published altitude</Text>
           <Text size="xs">┄ dashed: missed approach</Text>
+          <Text size="xs">│ white bar (focused): published vertical gap to a crossing procedure</Text>
+          <Text size="xs" c="#ffb000">│ amber bar (focused): crossing with no published separation</Text>
           <Text size="xs" c="dimmed" mt={4}>
             Arrivals only descend and departures only climb, so open sides reach the next leg's limit. Click a
-            procedure to focus it and see its restriction points.
+            procedure to focus it: the procedures crossing it stay drawn, with the vertical gap at each crossing.
           </Text>
         </Stack>
       )}
     </Paper>
+  );
+}
+
+const TYPE_NOUN: Record<ProcType, string> = { SID: "departure", STAR: "arrival", IAP: "approach" };
+
+/** What the focused procedure crosses, and how they are kept apart vertically (or not). */
+function Relations({ relations, onPick }: { relations: Relation[]; onPick: (key: string) => void }) {
+  if (!relations.length)
+    return (
+      <Text size="xs" c="dimmed" mt={4}>
+        No other loaded procedure crosses it.
+      </Text>
+    );
+  return (
+    <Stack gap={2} mt={6}>
+      <Text size="xs" c="dimmed">
+        Crossed by ({relations.length}), position relative to it at the crossing:
+      </Text>
+      {relations.map((r) => {
+        const sep = r.minGap != null && !r.open;
+        const gap = r.minGap != null ? `${r.minGap.toLocaleString()} ft ${r.above === "other" ? "above" : "below"}` : "";
+        const n = r.crossings.length;
+        const what = sep
+          ? gap
+          : r.minGap != null
+            ? `${gap} at ${n - r.open} of ${n} crossings`
+            : "no published separation";
+        return (
+          <Group
+            key={r.key}
+            gap={6}
+            wrap="nowrap"
+            align="flex-start"
+            style={{ cursor: "pointer" }}
+            onClick={() => onPick(r.key)}
+            title="Focus this procedure"
+          >
+            <ColorSwatch size={8} mt={4} style={{ flexShrink: 0 }} color={sep ? "#ffffff" : "#ffb000"} />
+            <Text size="xs">
+              <b>
+                {r.proc.airport} {r.proc.id}
+              </b>{" "}
+              <span style={{ opacity: 0.75 }}>
+                {TYPE_NOUN[r.proc.type]} · {what}
+              </span>
+            </Text>
+          </Group>
+        );
+      })}
+    </Stack>
   );
 }
