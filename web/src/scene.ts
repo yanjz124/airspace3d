@@ -43,6 +43,7 @@ import type {
 import { procKey } from "./types";
 import { describeAirspace, describeTransition, formatAlt, formatSpeed } from "./describe";
 import { newDrawn, simplify, type Drawn } from "./simplify";
+import type { Relation } from "./relations";
 
 const FT = 0.3048;
 const NM = 1852;
@@ -163,6 +164,10 @@ function gradient(kind: "fadeUp" | "fadeDown"): HTMLCanvasElement {
 export class AirspaceScene {
   readonly viewer: Viewer;
   private airspaceSrc = new CustomDataSource("airspace");
+  /** markers where other procedures cross the focused one */
+  private relSrc = new CustomDataSource("relations");
+  /** procedures crossing the focused one: drawn in full, like the focused one */
+  private related = new Set<string>();
   private airports = new Map<string, { file: AirportFile; src: CustomDataSource }>();
   private airspace = new Map<string, AirspaceFeature>();
   /** entities drawn for each airspace feature, so view changes only add/remove the difference */
@@ -220,6 +225,7 @@ export class AirspaceScene {
     this.viewer.camera.moveEnd.addEventListener(() => this.levelHorizon());
 
     this.viewer.dataSources.add(this.airspaceSrc);
+    this.viewer.dataSources.add(this.relSrc);
     this.dotLabels = scene.primitives.add(new LabelCollection());
 
     this.viewer.homeButton.viewModel.command.beforeExecute.addEventListener((e) => {
@@ -382,10 +388,11 @@ export class AirspaceScene {
   }
 
   /** What to draw, in which color, and which procedure (if any) is focused; redraws once. */
-  setStyle(filter: ProcFilter, colorOf: ColorFn, focus?: string) {
+  setStyle(filter: ProcFilter, colorOf: ColorFn, focus?: string, related: Set<string> = new Set()) {
     this.filter = filter;
     this.colorOf = colorOf;
     this.focus = focus;
+    this.related = related;
     const sel = this.viewer.selectedEntity;
     const selName = sel?.name;
     const selProc = sel?.properties?.proc?.getValue();
@@ -398,6 +405,64 @@ export class AirspaceScene {
     }
   }
 
+
+  /**
+   * Mark where other procedures cross the focused one: a vertical bar spanning the published
+   * gap between the two bands, labelled with it, or an amber bar over the overlap where the
+   * published limits do not keep them apart.
+   */
+  setRelations(rels: Relation[]) {
+    const ents = this.relSrc.entities;
+    ents.suspendEvents();
+    ents.removeAll();
+    for (const r of rels) {
+      const name = `${r.proc.airport} ${r.proc.id}`;
+      // one label per procedure, at its tightest published gap; the sidebar lists the rest
+      const tight = r.crossings.filter((c) => c.gap != null).sort((a, b) => a.gap! - b.gap!)[0];
+      for (const c of r.crossings) {
+        const at = (ft: number) => Cartesian3.fromDegrees(c.lon, c.lat, this.h(ft));
+        let from: number, to: number, text: string, color: Color;
+        if (c.gap != null) {
+          const [low, high] = c.above === "other" ? [c.focus, c.other] : [c.other, c.focus];
+          from = low.hi!;
+          to = high.lo!;
+          text = `${c.gap.toLocaleString()} ft ${c.above === "other" ? "under" : "over"} ${name}`;
+          color = Color.WHITE;
+        } else {
+          from = Math.max(c.focus.dlo, c.other.dlo);
+          to = Math.min(c.focus.dhi, c.other.dhi);
+          if (to <= from) [from, to] = [Math.min(c.focus.dhi, c.other.dhi), Math.max(c.focus.dlo, c.other.dlo)];
+          text = `crosses ${name} · no published separation`;
+          color = Color.fromCssColorString("#ffb000");
+        }
+        ents.add({
+          name,
+          properties: { proc: r.key },
+          polyline: {
+            positions: [at(from), at(to === from ? from + 300 : to)],
+            width: c.gap != null ? 4 : 3,
+            arcType: ArcType.NONE,
+            material: color,
+          },
+          position: at((from + to) / 2),
+          label: c !== tight ? undefined : {
+            text,
+            font: "600 12px system-ui, sans-serif",
+            fillColor: color,
+            outlineColor: Color.BLACK,
+            outlineWidth: 3,
+            style: LabelStyle.FILL_AND_OUTLINE,
+            horizontalOrigin: HorizontalOrigin.LEFT,
+            verticalOrigin: VerticalOrigin.CENTER,
+            pixelOffset: new Cartesian2(10, 0),
+            distanceDisplayCondition: new DistanceDisplayCondition(0, 150_000),
+            disableDepthTestDistance: 150_000,
+          },
+        });
+      }
+    }
+    ents.resumeEvents();
+  }
 
   /** Nationwide airport codes (cheap primitives); procedures are only drawn for active airports. */
   setIndex(airports: IndexAirport[]) {
@@ -560,7 +625,8 @@ export class AirspaceScene {
       const ts = this.filter(proc);
       if (!ts.length) continue;
       const color = Color.fromCssColorString(this.colorOf(proc));
-      if (this.focus && procKey(proc) !== this.focus) this.addGhost(src, proc, ts, color, ghosts);
+      const key = procKey(proc);
+      if (this.focus && key !== this.focus && !this.related.has(key)) this.addGhost(src, proc, ts, color, ghosts);
       else this.addProcedure(src, proc, ts, color, drawn);
     }
     ents.resumeEvents();
@@ -676,8 +742,10 @@ export class AirspaceScene {
       return c;
     };
     /** parts within range of the airport; the focused procedure is always shown whole */
-    const clip = (s: Segment) => (focused ? [s] : this.clipSegment(s));
-    const near = (p: ProcPoint) => focused || this.inRange(p.lon!, p.lat!);
+    // the focused procedure and those crossing it are drawn whole, ignoring the range slider
+    const whole = focused || this.related.has(procKey(proc));
+    const clip = (s: Segment) => (whole ? [s] : this.clipSegment(s));
+    const near = (p: ProcPoint) => whole || this.inRange(p.lon!, p.lat!);
     const tint = (t: Transition) => (t.kind === "missed" ? fa(color, 0.55) : color);
 
     // legs without any published altitude: ground track
